@@ -111,7 +111,7 @@ class Depth(nn.Module):
         conv3d_out = F.relu(self.bn3d_1(self.conv3d_1(cost)))
         conv3d_out = F.relu(self.bn3d_2(self.conv3D_2(conv3d_out)))
 
-        prob=F.softmax(-out,1)
+        prob = F.softmax(-conv3d_out, 1)
 
         return prob
 
@@ -122,23 +122,33 @@ class Depth(nn.Module):
             layers.append(block(in_planes,planes,step))
         return nn.Sequential(*layers)
 
-
-    def cost_volume(self,imgl,imgr):
+    def cost_volume(self,imgl,imgr, lr='left'):
 
         xx_list = []
 
-        pad_opr1 = nn.ZeroPad2d((0, self.maxdisp, 0, 0))
-        xleft = pad_opr1(imgl)
+        if lr == 'left':
+            pad_opr1 = nn.ZeroPad2d((0, self.maxdisp, 0, 0))
+            xleft = pad_opr1(imgl)
 
-        for d in range(self.maxdisp):  # maxdisp+1 ?
-            pad_opr2 = nn.ZeroPad2d((d, self.maxdisp - d, 0, 0))
-            xright = pad_opr2(imgr)
-            xx_temp = torch.cat((xleft, xright), 1)
-            xx_list.append(xx_temp)
+            for d in range(self.maxdisp):
+                pad_opr2 = nn.ZeroPad2d((d, self.maxdisp - d, 0, 0))
+                xright = pad_opr2(imgr)
+                xx_temp = torch.cat((xleft, xright), 1)
+                xx_list.append(xx_temp)
+
+        elif lr == 'right':
+            pad_opr1 = nn.ZeroPad2d((0, self.maxdisp, 0, 0))
+            xright = pad_opr1(imgr)
+
+            for d in range(self.maxdisp):
+                pad_opr2 = nn.ZeroPad2d((d, self.maxdisp - d, 0, 0))
+                xleft = pad_opr2(imgl)
+                xx_temp = torch.cat((xleft, xright), 1)
+                xx_list.append(xx_temp)
 
         xx = torch.cat(xx_list, 1)
         xx = xx.view(1, self.maxdisp, 64, int(self.height / 2), int(self.width / 2) + self.maxdisp)
-        xx0=xx.permute(0,2,1,3,4)
+        xx0 = xx.permute(0,2,1,3,4)
         xx0 = xx0[:, :, :, :, :int(self.width / 2)]
         
         return xx0

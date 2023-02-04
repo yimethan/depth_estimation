@@ -86,3 +86,11 @@ class Loss(nn.Module):
 
 
 
+def Depth_Loss(l_pred, r_pred, l_gt, r_gt):
+    
+    l_loss = torch.mean(torch.abs(l_gt - l_pred))
+    r_loss = torch.mean(torch.abs(r_gt - r_pred))
+
+    loss = l_loss + r_loss
+
+    return loss
