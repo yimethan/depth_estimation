@@ -122,7 +122,7 @@ class Depth(nn.Module):
             layers.append(block(in_planes,planes,step))
         return nn.Sequential(*layers)
 
-    def cost_volume(self,imgl,imgr, lr='left'):
+    def cost_volume(self, imgl, imgr, lr='left'):
 
         xx_list = []
 

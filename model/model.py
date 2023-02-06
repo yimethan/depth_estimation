@@ -131,8 +131,8 @@ class Model(nn.Module):
         img_r_1 = self.conv1(right_imgblock)
 
         # cost volume
-        cost_l = CenterNet.cost_volume(img_l_1, img_r_1, 'left')
-        cost_r = CenterNet.cost_volume(img_l_1, img_r_1, 'right')
+        cost_l = self.gcnet.cost_volume(img_l_1, img_r_1, 'left')
+        cost_r = self.gcnet.cost_volume(img_l_1, img_r_1, 'right')
 
         # TODO: centernet
         left_feats = self.backbone(left_img)
