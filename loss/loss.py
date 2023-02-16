@@ -1,25 +1,61 @@
 import torch
 from torch import nn
-from loss.losses import *
-from loss.utils import *
 import numpy as np
+import torch.nn.functional as F
 
-class Loss(nn.Module):
-    def __init__(self, cfg):
-        super(Loss, self).__init__()
-        self.down_stride = cfg.down_stride
+def compute_depth_errors(gt, pred):
+    """Computation of error metrics between predicted and ground truth depths
+    """
+    thresh = torch.max((gt / pred), (pred / gt))
+    a1 = (thresh < 1.25     ).float().mean()
+    a2 = (thresh < 1.25 ** 2).float().mean()
+    a3 = (thresh < 1.25 ** 3).float().mean()
 
-        self.focal_loss = modified_focal_loss
-        self.iou_loss = DIOULoss
-        self.l1_loss = F.l1_loss
+    rmse = (gt - pred) ** 2
+    rmse = torch.sqrt(rmse.mean())
 
-        self.alpha = cfg.loss_alpha
-        self.beta = cfg.loss_beta
-        self.gamma = cfg.loss_gamma
+    rmse_log = (torch.log(gt) - torch.log(pred)) ** 2
+    rmse_log = torch.sqrt(rmse_log.mean())
 
-    def forward(self, left_pred, right_pred, left_gt, right_gt):
+    abs_rel = torch.mean(torch.abs(gt - pred) / gt)
 
-        l_loss = torch.mean(torch.abs(left_gt - left_pred))
-        r_loss = torch.mean(torch.abs(right_gt - right_pred))
+    sq_rel = torch.mean((gt - pred) ** 2 / gt)
 
-        return l_loss + r_loss
+    return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
+
+
+def compute_depth_losses(self, inputs, outputs, losses):
+    """Compute depth metrics, to allow monitoring during training
+
+    This isn't particularly accurate as it averages over the entire batch,
+    so is only used to give an indication of validation performance
+    """
+    depth_pred = outputs[("depth", 0, 0)]
+    depth_pred = torch.clamp(F.interpolate(
+        depth_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
+    depth_pred = depth_pred.detach()
+
+    depth_gt = inputs["depth_gt"]
+    mask = depth_gt > 0
+
+    # garg/eigen crop
+    crop_mask = torch.zeros_like(mask)
+    crop_mask[:, :, 153:371, 44:1197] = 1
+    mask = mask * crop_mask
+
+    depth_gt = depth_gt[mask]
+    depth_pred = depth_pred[mask]
+    depth_pred *= torch.median(depth_gt) / torch.median(depth_pred)
+
+    depth_pred = torch.clamp(depth_pred, min=1e-3, max=80)
+
+    depth_errors = compute_depth_errors(depth_gt, depth_pred)
+
+    for i, metric in enumerate(self.depth_metric_names):
+        losses[metric] = np.array(depth_errors[i].cpu())
+
+def loss(xx, loss_mul, gt):
+
+    loss = torch.sum(torch.sqrt(torch.pow(torch.sum(xx.mul(loss_mul),1)-gt,2)+0.00000001)/256/(256+128))
+    
+    return loss

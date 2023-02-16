@@ -1,55 +1,80 @@
-from loss.utils import map2coords
 import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from .backbone.renset import ResNet
-from model.decoder import Decoder
-from model.head import Head
-from model.fpn import FPN
-from model.centernet import CenterNet
-from model.depth import Depth
-from config.kitti import Config
+import config.config
+from DLAnet import DlaNet
+from detect import Predictor
+import config.config
+
+def GcNet(height,width,maxdisp):
+
+    return Model(BasicBlock, ThreeDConv, [8,1], height, width, maxdisp)
+
+class BasicBlock(nn.Module):  #basic block for Conv2d
+    def __init__(self,in_planes,planes,stride=1):
+        super(BasicBlock,self).__init__()
+        self.conv1=nn.Conv2d(in_planes,planes,kernel_size=3,stride=stride,padding=1)
+        self.bn1=nn.BatchNorm2d(planes)
+        self.conv2=nn.Conv2d(planes,planes,kernel_size=3,stride=1,padding=1)
+        self.bn2=nn.BatchNorm2d(planes)
+        self.shortcut=nn.Sequential()
+    def forward(self, x):
+        out=F.relu(self.bn1(self.conv1(x)))
+        out=self.bn2(self.conv2(out))
+        out+=self.shortcut(x)
+        out=F.relu(out)
+        return out
+
+class ThreeDConv(nn.Module):
+    def __init__(self,in_planes,planes,stride=1):
+        super(ThreeDConv, self).__init__()
+        self.conv1 = nn.Conv3d(in_planes, planes, kernel_size=3, stride=stride, padding=1)
+        self.bn1 = nn.BatchNorm3d(planes)
+        self.conv2 = nn.Conv3d(planes, planes, kernel_size=3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm3d(planes)
+        self.conv3=nn.Conv3d(planes,planes,kernel_size=3,stride=1,padding=1)
+        self.bn3=nn.BatchNorm3d(planes)
+
+    def forward(self, x):
+        out=F.relu(self.bn1(self.conv1(x)))
+        out=F.relu(self.bn2(self.conv2(out)))
+        out=F.relu(self.bn3(self.conv3(out)))
+        return out
 
 
 class Model(nn.Module):
 
-    def __init__(self, cfg, block, block_3d, num_block, h, w, maxdisp, topK=40):
-        
-        super(Model, self).__init()
+    def __init__(self, block, block_3d, num_block, height, width, maxdisp):
 
-        centernet = CenterNet()
-        gcnet = Depth()
+        super(Model, self).__init__()
 
-        self._fpn = cfg.fpn
-        self.down_stride = cfg.down_stride
-        self.score_th = cfg.score_th
-        self.CLASSES_NAME = cfg.CLASSES_NAME
-
-        self.h = h
-        self.w = w
+        self.height = height
+        self.width = width
         self.maxdisp = int(maxdisp/2)
-        self.in_places = 32
+        self.in_planes = 32
 
-        self.topK = topK
+        # model to detect vehicles
+        detect_model = DlaNet(34)
+        detect_model.load_state_dict(torch.load(config.centernet_path))
+        detect_model.eval()
 
-        self.backbone = ResNet(cfg.slug)
-        if cfg.fpn:
-            self.fpn = FPN(self.backbone.outplanes)
-        self.upsample = Decoder(self.backbone.outplanes if not cfg.fpn else 2048, cfg.bn_momentum)
-        self.head = Head(channel=cfg.head_channel, num_classes=cfg.num_classes)
-        
-        # depth
-        self.conv0 = nn.Conv2d(3, 3, 2, 5, 2, 2)
-        self.bn0 = nn.BatchNorm2d(32)
+        self.my_predictor = Predictor(use_gpu=True)
 
-        self.res_block = centernet._make_layer(block, self)
+        #first two conv2d
+        self.conv0=nn.Conv2d(3,32,5,2,2)
+        self.bn0=nn.BatchNorm2d(32)
 
-        self.conv1=nn.Conv2d(32, 32, 3, 1, 1)
+        #res block
+        self.res_block=self._make_layer(block,self.in_planes,32,num_block[0],stride=1)
 
-        self.conv3d_1=nn.Conv3d(64, 32, 3, 1, 1)
+        #last conv2d
+        self.conv1=nn.Conv2d(32,32,3,1,1)
+
+        #conv3d
+        self.conv3d_1=nn.Conv3d(64,32,3,1,1)
         self.bn3d_1=nn.BatchNorm3d(32)
-        self.conv3d_2=nn.Conv3d(32, 32, 3, 1, 1)
+        self.conv3d_2=nn.Conv3d(32,32,3,1,1)
         self.bn3d_2=nn.BatchNorm3d(32)
 
         self.conv3d_3=nn.Conv3d(64,64,3,2,1)
@@ -59,12 +84,14 @@ class Model(nn.Module):
         self.conv3d_5=nn.Conv3d(64,64,3,2,1)
         self.bn3d_5=nn.BatchNorm3d(64)
 
-        self.block_3d_1 = centernet._make_layer(block_3d, 64, 64, num_block[1], stride=2)
-        self.block_3d_2 = centernet._make_layer(block_3d, 64, 64, num_block[1], stride=2)
-        self.block_3d_3 = centernet._make_layer(block_3d, 64, 64, num_block[1], stride=2)
-        self.block_3d_4 = centernet._make_layer(block_3d, 64, 128, num_block[1], stride=2)
+        #conv3d sub_sample block
+        self.block_3d_1 = self._make_layer(block_3d, 64, 64, num_block[1],stride=2)
+        self.block_3d_2 = self._make_layer(block_3d, 64, 64, num_block[1], stride=2)
+        self.block_3d_3 = self._make_layer(block_3d, 64, 64, num_block[1], stride=2)
+        self.block_3d_4 = self._make_layer(block_3d, 64, 128, num_block[1], stride=2)
 
-        self.deconv1=nn.ConvTranspose3d(128, 64, 3, 2, 1, 1)
+        #deconv3d
+        self.deconv1=nn.ConvTranspose3d(128,64,3,2,1,1)
         self.debn1=nn.BatchNorm3d(64)
         self.deconv2 = nn.ConvTranspose3d(64, 64, 3, 2, 1, 1)
         self.debn2 = nn.BatchNorm3d(64)
@@ -72,172 +99,145 @@ class Model(nn.Module):
         self.debn3 = nn.BatchNorm3d(64)
         self.deconv4 = nn.ConvTranspose3d(64, 32, 3, 2, 1, 1)
         self.debn4 = nn.BatchNorm3d(32)
-        
+
+        #last deconv3d
         self.deconv5 = nn.ConvTranspose3d(32, 1, 3, 2, 1, 1)
 
-    def detects(self, head, return_hm=False, th=None):
+    def car_img(self, bboxes, img):
 
-        b, c, output_h, output_w = head.pred_hm.shape
-        head.pred_hm = CenterNet.pool_nms(head.pred_hm)
-        scores, index, clses, ys, xs = self.topk_score(head.pred_hm, K=self.topK)
+        new_img = np.copy(img)
 
-        reg = CenterNet.gather_feature(head.pred_offset, index, use_transform=True)
-        reg = reg.reshape(b, self.topK, 2)
-        xs = xs.view(b, self.topK, 1) + reg[:, :, 0:1]
-        ys = ys.view(b, self.topK, 1) + reg[:, :, 1:2]
+        for box in bboxes:
 
-        wh = CenterNet.gather_feature(head.pred_wh, index, use_transform=True)
-        wh = wh.reshape(b, self.topK, 2)
+            for x in range(self.height):
+                for y in range(self.width):
 
-        clses = clses.reshape(b, self.topK, 1).float()
-        scores = scores.reshape(b, self.topK, 1)
+                    if not ((x >= box[0]) and (x <= box[2])) and ((y >= box[1]) and (y <= box[3])):
 
-        half_w, half_h = wh[..., 0:1] / 2, wh[..., 1:2] / 2
-        bboxes = torch.cat([xs - half_w, ys - half_h, xs + half_w, ys + half_h], dim=2)
+                        new_img[x][y] = 0
 
-        detects = []
-        for batch in range(b):
-            mask = scores[batch].gt(self.score_th if th is None else th)
+        return new_img
 
-            batch_boxes = bboxes[batch][mask.squeeze(-1), :]
-            batch_boxes[:, [0, 2]] *= self.w / output_w
-            batch_boxes[:, [1, 3]] *= self.h / output_h
-
-            batch_scores = scores[batch][mask]
-
-            batch_clses = clses[batch][mask]
-            batch_clses = [self.CLASSES_NAME[int(cls.item())] for cls in batch_clses]
-
-            detects.append([batch_boxes, batch_scores, batch_clses, head.pred_hm[batch] if return_hm else None])
-
-        return detects
-
-    def pool_nms(self, hm, pool_size=3):
-        pad = (pool_size - 1) // 2
-        hm_max = F.max_pool2d(hm, pool_size, stride=1, padding=pad)
-        keep = (hm_max == hm).float()
-        return hm * keep
-
-    def forward(self, left_img, right_img):
-
-        # TODO: estimate depth of left & right image
-        img_l_0 = F.relu(self.bn0(self.conv0(left_img)))
-        img_r_0 = F.relu(self.bn0(self.conv0(right_img)))
-
-        left_imgblock = self.res_block(img_l_0)
-        right_imgblock = self.res_block(img_r_0)
-
-        img_l_1 = self.conv1(left_imgblock)
-        img_r_1 = self.conv1(right_imgblock)
-
-        # cost volume
-        cost_l = self.gcnet.cost_volume(img_l_1, img_r_1, 'left')
-        cost_r = self.gcnet.cost_volume(img_l_1, img_r_1, 'right')
-
-        # TODO: centernet
-        left_feats = self.backbone(left_img)
-        if self._fpn:
-            left_feat = self.fpn(left_feats)
-        else:
-            left_feat = left_feats[-1]
-        left_head = self.head(self.upsample(left_feat)) # pred_hm, pred_wh, pred_offset
-
-        right_feats = self.backbone(right_img)
-        if self._fpn:
-            right_feat = self.fpn(right_feats)
-        else:
-            right_feat = right_feats[-1]
-        right_head = self.head(self.upsample(right_feat))
-
-        left_detects = self.detects(left_head) # list of [batch_boxes, batch_scores, batch_clses, head.pred_hm[batch] if return_hm else None]
-        right_detects = self.detects(right_head)
-
-        # TODO: modify results of centernet (zero array with only vehicle images)
-        _, _, height, width = left_head.shape
-
-        l_zero_img = np.zeros((height, width))
-        r_zero_img = np.zeros((height, width))
-        l_re = img_l_0.reshape(height, width)
-        r_re = img_r_0.reshape(height, width)
+    def forward(self, imgLeft, imgRight):
         
-        for det in left_detects:
-            for i in det[0]: # det[0] : batch boxes
-                for x in range(0, height):
-                    if (x >= i[1]) & (x <= i[3]):
-                        for y in range(0, width):
-                            if (y >= i[0]) & (y <= i[2]):
-                                l_zero_img[x][y] = l_re[x][y]
+        imgl0=F.relu(self.bn0(self.conv0(imgLeft)))
+        imgr0=F.relu(self.bn0(self.conv0(imgRight)))
+
+        imgl_block=self.res_block(imgl0)
+        imgr_block=self.res_block(imgr0)
+
+        imgl1=self.conv1(imgl_block)
+        imgr1=self.conv1(imgr_block)
+
+        # img with only vehicles
+        with torch.no_grad():
+
+            _, l_dets = self.my_predictor.process(imgLeft)
+            _, r_dets = self.my_predictor.process(imgRight)
+
+            l_boxes = l_dets.numpy()[0]
+            r_boxes = r_dets.numpy()[0]
+
+            # l_boxes = self.my_predictor.input2image(l_boxes)
+            # r_boxes = self.my_predictor.input2image(r_boxes)
+
+        carl = self.car_img(l_boxes, imgLeft)
+        carr = self.car_img(r_boxes, imgRight)
+
+        carl0=F.relu(self.bn0(self.conv0(carl)))
+        carr0=F.relu(self.bn0(self.conv0(carr)))
+
+        carl_block=self.res_block(carl0)
+        carr_block=self.res_block(carr0)
+
+        carl1=self.conv1(carl_block)
+        carr1=self.conv1(carr_block)
+
+        # cost_volume = self.cost_volume(imgl1,imgr1)
+        cost_volume_left, cost_volume_right = self.cost_volume(imgl1,imgr1, carl1, carr1)
+
+        left_out = self.after_cost(cost_volume_left)
+        right_out = self.after_cost(cost_volume_right)
+
+        left_prob = F.softmax(-left_out, 1)
+        right_prob = F.soft_margin_loss(-right_out, 1)
+
+        return left_prob, right_prob
+
+    def after_cost(self, cost_volume):
+
+        conv3d_out=F.relu(self.bn3d_1(self.conv3d_1(cost_volume)))
+        conv3d_out=F.relu(self.bn3d_2(self.conv3d_2(conv3d_out)))
+
+        #conv3d block
+        conv3d_block_1=self.block_3d_1(cost_volume)
+        conv3d_21=F.relu(self.bn3d_3(self.conv3d_3(cost_volume)))
+        conv3d_block_2=self.block_3d_2(conv3d_21)
+        conv3d_24=F.relu(self.bn3d_4(self.conv3d_4(conv3d_21)))
+        conv3d_block_3=self.block_3d_3(conv3d_24)
+        conv3d_27=F.relu(self.bn3d_5(self.conv3d_5(conv3d_24)))
+        conv3d_block_4=self.block_3d_4(conv3d_27)
         
-        for det in right_detects:
-            for i in det[0]: # det[0] : batch boxes
-                for x in range(0, height):
-                    if (x >= i[1]) & (x <= i[3]):
-                        for y in range(0, width):
-                            if (y >= i[0]) & (y <= i[2]):
-                                r_zero_img[x][y] = r_re[x][y]
+        #deconv
+        deconv3d=F.relu(self.debn1(self.deconv1(conv3d_block_4))+conv3d_block_3)
+        deconv3d=F.relu(self.debn2(self.deconv2(deconv3d))+conv3d_block_2)
+        deconv3d=F.relu(self.debn3(self.deconv3(deconv3d))+conv3d_block_1)
+        deconv3d=F.relu(self.debn4(self.deconv4(deconv3d))+conv3d_out)
 
-        # TODO: estimate depth to results of centernet
-        carimg_l_0 = F.relu(self.bn0(self.conv0(l_zero_img)))
-        carimg_r_0 = F.relu(self.bn0(self.conv0(r_zero_img)))
+        #last deconv3d
+        deconv3d=self.deconv5(deconv3d)
+        out=deconv3d.view(1, self.maxdisp*2, self.height, self.width)
 
-        carleft_imgblock = self.res_block(carimg_l_0)
-        carright_imgblock = self.res_block(carimg_r_0)
+        return out
 
-        carimg_l_1 = self.conv1(carleft_imgblock)
-        carimg_r_1 = self.conv1(carright_imgblock)
+    def _make_layer(self,block,in_planes,planes,num_block,stride):
+        strides=[stride]+[1]*(num_block-1)
+        layers=[]
+        for step in strides:
+            layers.append(block(in_planes,planes,step))
+        return nn.Sequential(*layers)
 
-        # cost volume
-        l_car_cost = CenterNet.cost_volume(carimg_l_1, carimg_r_1, 'left')
-        r_car_cost = CenterNet.cost_volume(carimg_l_1, carimg_r_1, 'right')
 
-        # TODO: concatenate cost & car_cost (simply concatenate in 'disp' direction)
-        fin_cost_l = torch.cat([cost_l, l_car_cost], 2)
-        fin_cost_r = torch.cat([cost_r, r_car_cost], 2)
+    def cost_volume(self, imgl, imgr, carl, carr, lr):
 
-        conv3d_out_l = F.relu(self.bn3d_1(self.conv3d_1(fin_cost_l)))
-        conv3d_out_l = F.relu(self.bn3d_2(self.conv3D_2(conv3d_out_l)))
+        xx_list = []
 
-        conv3d_out_r = F.relu(self.bn3d_1(self.conv3d_1(fin_cost_r)))
-        conv3d_out_r = F.relu(self.bn3d_2(self.conv3D_2(conv3d_out_r)))
+        pad_opr1 = nn.ZeroPad2d((0, self.maxdisp, 0, 0))
+        pad_opr2 = nn.ZeroPad2d((d, self.maxdisp - d, 0, 0))
+        
+        # left + right
+        xleft = pad_opr1(imgl)
+        yleft = pad_opr1(carl)
 
-        # TODO: 3d conv
-        #left
-        lconv3d_block_1 = self.block_3d_1(fin_cost_l)
-        lconv3d_21 = F.relu(self.bn3d_3(self.conv3d_3(fin_cost_l)))
-        lconv3d_block_2 = self.block_3d_2(lconv3d_21)
-        lconv3d_24 = F.relu(self.bn3d_4(self.conv3d_4(lconv3d_21)))
-        lconv3d_block_3 = self.block_3d_3(lconv3d_24)
-        lconv3d_27 = F.relu(self.bn3d_5(self.conv3d_5(lconv3d_24)))
-        lconv3d_block_4 = self.block_3d_4(lconv3d_27)
+        for d in range(self.maxdisp):
+            xright = pad_opr2(imgr)
+            yright = pad_opr2(carr)
+            xx_temp = torch.cat((xleft, yleft, xright, yright), 1)
+            xx_list.append(xx_temp)
 
-        # right
-        rconv3d_block_1 = self.block_3d_1(fin_cost_r)
-        rconv3d_21 = F.relu(self.bn3d_3(self.conv3d_3(fin_cost_r)))
-        rconv3d_block_2 = self.block_3d_2(rconv3d_21)
-        rconv3d_24 = F.relu(self.bn3d_4(self.conv3d_4(rconv3d_21)))
-        rconv3d_block_3 = self.block_3d_3(rconv3d_24)
-        rconv3d_27 = F.relu(self.bn3d_5(self.conv3d_5(rconv3d_24)))
-        rconv3d_block_4 = self.block_3d_4(rconv3d_27)
+        xx = torch.cat(xx_list, 1)
+        xx = xx.view(1, self.maxdisp, 64, int(self.height / 2), int(self.width / 2) + self.maxdisp)
+        xx_left = xx.permute(0,2,1,3,4)
+        xx_left = xx_left[:, :, :, :, :int(self.width / 2)]
 
-        # TODO: 3d deconv
-        # left
-        ldeconv3d = F.relu(self.debn1(self.deconv1(lconv3d_block_4))+lconv3d_block_3)
-        ldeconv3d = F.relu(self.debn2(self.deconv2(ldeconv3d))+lconv3d_block_2)
-        ldeconv3d = F.relu(self.debn3(self.deconv3(ldeconv3d))+lconv3d_block_1)
-        ldeconv3d = F.relu(self.debn4(self.deconv4(ldeconv3d))+conv3d_out_l)
+        xx_list = []
 
-        ldeconv3d=self.deconv5(ldeconv3d)
+        pad_opr3 = nn.ZeroPad2d((self.maxdisp, 0, 0, 0))
+        pad_opr4 = nn.ZeroPad2d((self.maxdisp - d, d, 0, 0))
 
-        # right
-        rdeconv3d = F.relu(self.debn1(self.deconv1(rconv3d_block_4))+rconv3d_block_3)
-        rdeconv3d = F.relu(self.debn2(self.deconv2(rdeconv3d))+rconv3d_block_2)
-        rdeconv3d = F.relu(self.debn3(self.deconv3(rdeconv3d))+rconv3d_block_1)
-        rdeconv3d = F.relu(self.debn4(self.deconv4(rdeconv3d))+conv3d_out_r)
+        # right + left
+        xright = pad_opr3(imgr)
+        yright = pad_opr3(carr)
 
-        rdeconv3d=self.deconv5(rdeconv3d)
+        for d in range(self.maxdisp):
+            xleft = pad_opr4(imgl)
+            yleft = pad_opr4(carl)
+            xx_temp = torch.cat((xright, yright, xleft, yleft), 1)
+            xx_list.apend(xx_temp)
 
-        # TODO: soft argmin
-        prob_l = F.softmax(-ldeconv3d, 1)
-        prob_r = F.softmax(-rdeconv3d, 1)
+        xx = torch.cat(xx_list, 1)
+        xx = xx.view(1, self.maxdisp, 64, int(self.height / 2), int(self.width / 2) + self.maxdisp)
+        xx_right = xx.permute(0,2,1,3,4)
+        xx_right = xx_right[:, :, :, :, :int(self.width / 2)]
 
-        return prob_l, prob_r
+        return xx_left, xx_right
