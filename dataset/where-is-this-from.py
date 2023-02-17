@@ -64,13 +64,11 @@ class Dataset(object):
 
     def getGtDepthMap(self):
 
-        # maybe this part is using 'calib_velo_to_cam.txt'?
+        for path in self.depthGt_train:
+            calib_path = os.path.join(self.data_path, folder.split("/")[0])
 
-        # for path in self.depthGt_train:
-        #     calib_path = os.path.join(self.data_path, folder.split("/")[0])
-        #
-        #     depth_gt = generate_depth_map(calib_path, velo_filename, self.side_map[side])
-        #     depth_gt = skimage.transform.resize(depth_gt, self.full_res_shape[::-1], order=0, preserve_range=True, mode='constant')
+            depth_gt = generate_depth_map(calib_path, velo_filename, self.side_map[side])
+            depth_gt = skimage.transform.resize(depth_gt, self.full_res_shape[::-1], order=0, preserve_range=True, mode='constant')
 
     def getDetectionGtPath(self):
 
