@@ -47,6 +47,8 @@ class Dataset(data.Dataset):
         l_img, r_img = self.transform(l_img), self.transform(r_img)
 
         # no resize for depth
+        l_depth = Image.open(self.depths['l'][idx])
+        r_depth = Image.open(self.depths['r'][idx])
         l_depth = torch.from_numpy((l_depth / 255.).astype(np.float32))
         r_depth = torch.from_numpy((r_depth / 255.).astype(np.float32))
 
@@ -98,14 +100,4 @@ class Dataset(data.Dataset):
    1    rotation_y   Rotation ry around Y-axis in camera coordinates [-pi..pi]
    1    score        Only for results: Float, indicating confidence in
                      detection, needed for p/r curves, higher is better.
-
-To project a point from Velodyne coordinates into the left color image,
-you can use this formula: x = P2 * R0_rect * Tr_velo_to_cam * y
-For the right color image: x = P3 * R0_rect * Tr_velo_to_cam * y
-
-Note: All matrices are stored row-major, i.e., the first values correspond
-to the first row. R0_rect contains a 3x3 matrix which you need to extend to
-a 4x4 matrix by adding a 1 as the bottom-right element and 0's elsewhere.
-Tr_xxx is a 3x4 matrix (R|t), which you need to extend to a 4x4 matrix 
-in the same way!
 '''

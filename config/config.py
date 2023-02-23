@@ -6,7 +6,7 @@ class Config(object):
 
     gpu = True
 
-    model_name ='my_model.pth'
+    model_name = 'my_model.pth'
     log_dir = './outputs/log'
     checkpoint_dir = './outputs/ckp'
 
