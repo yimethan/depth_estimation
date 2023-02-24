@@ -1,6 +1,6 @@
 import os
 import numpy as np
-from PIL import Image
+import cv2
 import torch
 import torch.nn as nn
 import torch.utils.data as data
@@ -20,7 +20,7 @@ class Dataset(data.Dataset):
                            [0, 0, 1, 0],
                            [0, 0, 0, 1]], dtype=np.float32)
 
-        fullres_shape = (1242, 375)
+        self.fullres_shape = (1242, 375)
 
         self.is_train = True
 
@@ -31,7 +31,7 @@ class Dataset(data.Dataset):
         self.images = {'l':[], 'r':[]}
         self.depths = {'l':[], 'r':[]}
         
-        self.transform = Transform
+        self.transform = Transform()
 
         self.get_data_from_dir()
 
@@ -41,16 +41,17 @@ class Dataset(data.Dataset):
         
     def __getitem__(self, idx):
 
-        l_img = Image.open(self.images['l'][idx])
-        r_img = Image.open(self.images['r'][idx])
+        l_img = self.images['l'][idx]
+        r_img = self.images['r'][idx]
 
-        l_img, r_img = self.transform(l_img), self.transform(r_img)
+        l_img = self.transform(l_img)
+        r_img = self.transform(r_img)
 
-        # no resize for depth
-        l_depth = Image.open(self.depths['l'][idx])
-        r_depth = Image.open(self.depths['r'][idx])
-        l_depth = torch.from_numpy((l_depth / 255.).astype(np.float32))
-        r_depth = torch.from_numpy((r_depth / 255.).astype(np.float32))
+        l_depth = self.depths['l'][idx]
+        r_depth = self.depths['r'][idx]
+
+        l_depth = self.transform(l_depth)
+        r_depth = self.transform(r_depth)
 
         item = {'l_img': l_img, 'r_img': r_img,
                 'l_depth': l_depth, 'r_depth': r_depth}
@@ -59,28 +60,30 @@ class Dataset(data.Dataset):
         
     def get_data_from_dir(self):
 
-            depth_folder = '../dataset/data_depth_annotated/{}'.format('train' if self.is_train else 'val')
+        depth_folder = '../dataset/data_depth_annotated/{}'.format('train' if self.is_train else 'val')
 
-            for sync in os.listdir(depth_folder):
+        for sync in os.listdir(depth_folder):
 
-                date = sync[:10]
+            date = sync[:10]
                          
-                depth_img_folder = os.path.join(sync, 'proj_depth/ground_truth/image_0{}')
+            depth_img_folder = os.path.join(sync, 'proj_depth/groundtruth/image_0')
 
-                for img_num in os.listdir(os.path.join(depth_folder, depth_folder(2))):
-                            
-                    full_img_path = os.path.join(self.dataset_path, date, sync, 'image_0{}/data', '{:010d}.png'.format(img_num))
-                    full_depth_path = os.path.join(depth_folder, depth_img_folder, '{:010d}.png'.format(img_num))
+            for img_num in os.listdir(os.path.join(depth_folder, depth_img_folder+'2')):
 
-                    self.images['l'].append(full_img_path(2))
-                    self.images['r'].append(full_img_path(3))
+                for side in [2, 3]:
 
-                    l_depth = Image.open(full_depth_path(2))
-                    r_depth = Image.open(full_depth_path(3))
+                    full_img_path = os.path.join(self.dataset_path, date, sync,
+                                                     'image_0{}/data'.format(side), img_num)
+                    full_depth_path = os.path.join(depth_folder, depth_img_folder+'{}'.format(side), img_num)
 
-                    self.depths['l'].append(l_depth)
-                    self.depths['r'].append(r_depth)
-                        
+                    if os.path.isfile(full_img_path):
+
+                        depth = cv2.imread(full_depth_path)
+                        depth = cv2.resize(depth, self.fullres_shape, interpolation=cv2.INTER_NEAREST)
+                        self.depths['l' if side == 2 else 'r'].append(depth)
+
+                        img = cv2.imread(full_img_path)
+                        self.images['l' if side == 2 else 'r'].append(img)
 '''
 #Values    Name      Description
 ----------------------------------------------------------------------------

@@ -15,8 +15,10 @@ class Model(nn.Module):
 
         print("Creating model...")
 
+        super(Model, self).__init__()
+
         self.detect_model = DlaNet()
-        self.detect_model.load_state_dict(Config.centernet_path)
+        self.detect_model.load_state_dict(torch.load(Config.centernet_path))
 
         # freeze detection model's layers
         for param in self.detect_model.parameters():
@@ -136,7 +138,7 @@ class Model(nn.Module):
             wh[0, i, 0] = wh[0, i, 0] * 4
             wh[0, i, 1] = wh[0, i, 1] * 4
 
-    def generate_newinp(inp, box):
+    def generate_newinp(inp, boxes):
         
         # TODO: there are multiple bboxes
         # generate zero padding img
@@ -146,13 +148,15 @@ class Model(nn.Module):
         size = torch.Size(inp)
         newinp = torch.zeros(size[0], size[1])
 
-        for x in Config.width:
+        for box in boxes:
 
-            for y in Config.height:
+            for x in Config.width:
 
-                if (x >= box[0]) or (x <= box[2]) or (y <= box[3]) or (y >= box[1]):
-                    
-                    newinp[x][y] = inp[x][y]
+                for y in Config.height:
+
+                    if (x >= box[0]) or (x <= box[2]) or (y <= box[3]) or (y >= box[1]):
+
+                        newinp[x][y] = inp[x][y]
 
         return newinp
     
@@ -200,7 +204,7 @@ class DepthBlock(nn.Module):
 
     def __init__(self, block, block_3d, num_block, h, w, maxdisp):
 
-        super(Model, self).__init__()
+        super(DepthBlock, self).__init__()
 
         self.height = h
         self.width = w

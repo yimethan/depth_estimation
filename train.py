@@ -12,18 +12,19 @@ from model.model import Model
 
 class Train:
 
-    def __init__(self, config):
+    def __init__(self):
 
         assert Config.height % 32 == 0, "'height' must be a multiple of 32"
         assert Config.width % 32 == 0, "'width' must be a multiple of 32"
 
-        self.device = torch.device("cpu" if Config.no_cuda else "cuda")
+        self.device = torch.device("cuda")
 
         self.model = Model()
 
-        self.model_optimizer = optim.Adam(self.model.parameters(), Config.learning_rate)
-        self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, Config.scheduler_step_size, 0.1)
+        self.model_optimizer = optim.Adam(self.model.parameters(), Config.lr)
+        self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, Config.scheduler_f, 0.1)
 
+        print("Loading dataset...")
         train_dataset = Dataset(is_train=True)
         self.train_loader = DataLoader(train_dataset, Config.batch_size, True,
             num_workers=Config.num_workers, pin_memory=True, drop_last=True)
@@ -31,37 +32,23 @@ class Train:
         self.val_loader = DataLoader(val_dataset, Config.batch_size, True,
             num_workers=Config.num_workers, pin_memory=True, drop_last=True)
 
-        assert len(train_dataset.images['l']) == len(train_dataset.images['r']), \
-            "Number of left and right images of train set must be equal"
-        assert len(train_dataset.images['l']) == len(train_dataset.depth['l']), \
-            "Number of left images and depth gt of train set must be equal"
-        assert len(train_dataset.images['r']) == len(train_dataset.depth['r']), \
-            "Number of right images and depth gt of train set must be equal"
-
-        assert len(val_dataset.images['l']) == len(val_dataset.images['r']), \
-            "Number of left and right images of val set must be equal"
-        assert len(val_dataset.images['l']) == len(val_dataset.depth['l']), \
-            "Number of left images and depth gt of val set must be equal"
-        assert len(val_dataset.images['r']) == len(val_dataset.depth['r']), \
-            "Number of right images and depth gt of val set must be equal"
-
         num_train_samples = len(train_dataset)
         self.num_total_steps = num_train_samples // Config.batch_size * Config.epochs
         
         self.val_iter = iter(self.val_loader)
 
+        print("Done loading dataset")
+
         self.writers = {}
         for mode in ["train", "val"]:
-            self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
+            self.writers[mode] = SummaryWriter(os.path.join(Config.log_dir, mode))
 
-        self.depth_metric_names = [
-            "de/abs_rel", "de/sq_rel", "de/rms", "de/log_rms", "da/a1", "da/a2", "da/a3"]
-
-        print("Using split:\n  ", Config.split)
-        print("There are {:d} training pairs and {:d} validation pairs\n".format(
-            len(train_dataset), len(val_dataset)))
+        # self.depth_metric_names = [
+        #     "de/abs_rel", "de/sq_rel", "de/rms", "de/log_rms", "da/a1", "da/a2", "da/a3"]
         
     def train(self):
+
+        print("Start training")
 
         self.start_time = time.time()
 
@@ -83,6 +70,7 @@ class Train:
                     os.makedirs(save_folder)
 
                 # save model
+                print("saving model for this epoch")
                 save_path = os.path.join(save_folder, '{}.pth'.format(Config.model_name))
                 torch.save(self.model.state_dict(), save_path)
 
@@ -103,7 +91,7 @@ class Train:
             #     'l_bbox':left_y, 'r_bbox':right_y}
             outputs = self.model(inputs['l_img'], inputs['r_img'])
 
-            loss, car_loss = self.compute_loss(inputs['l_img'], inputs['r_img'],
+            loss = self.compute_loss(inputs['l_img'], inputs['r_img'],
                                     outputs['l_prob'], outputs['r_prob'])
             self.model_optimizer.zero_grad()
             loss.backward()
@@ -112,7 +100,7 @@ class Train:
             duration = time.time() - start_time
 
             # log less frequently after the first 2000 steps to save time & disk space
-            early_phase = batch_idx % Config.log_frequency == 0 and self.step < 2000
+            early_phase = batch_idx % Config.log_f == 0 and self.step < 2000
             late_phase = self.step % 2000 == 0
 
             if early_phase or late_phase:
@@ -158,17 +146,9 @@ class Train:
             car_errors = self.compute_car_errors(inputs, outputs)
 
             self.log("val", inputs, outputs, loss, car_errors, errors)
-            del inputs, outputs, losses
+            del inputs, outputs, loss
 
-        self.set_train()
-        
-    def readlines(filename):
-
-        with open(filename, 'r') as f:
-
-            lines = f.read().splitlines()
-
-        return lines
+        self.model.train()
     
     def log_time(self, batch_idx, duration, loss):
         """Print a logging statement to the terminal
@@ -245,17 +225,17 @@ class Train:
         # l_pred -> l_newpred / r_pred -> r_newpred
         # l_gt -> l_newgt / r_gt r_newgt
 
-        outputs['l_pred'] = Model.generate_newinp(outputs['l_pred'], outputs['l_bbox'])
-        outputs['r_pred'] = Model.generate_newinp(outputs['r_pred'], outputs['r_bbox'])
-        inputs['l_depth'] = Model.generate_newinp(inputs['l_depth'], outputs['l_bbox'])
-        inputs['r_depth'] = Model.generate_newinp(inputs['r_depth'], outputs['r_bbox'])
+        outputs['l_pred'] = self.model.generate_newinp(outputs['l_pred'], outputs['l_bbox'])
+        outputs['r_pred'] = self.model.generate_newinp(outputs['r_pred'], outputs['r_bbox'])
+        inputs['l_depth'] = self.model.generate_newinp(inputs['l_depth'], outputs['l_bbox'])
+        inputs['r_depth'] = self.model.generate_newinp(inputs['r_depth'], outputs['r_bbox'])
 
         return self.compute_errors(inputs, outputs)
     
     def compute_loss(self, l_gt, r_gt, l_pred, r_pred):
 
         loss_left = torch.mean((l_pred - l_gt)**2)
-        loss_right = torch.mean((r_pred, r_gt)**2)
+        loss_right = torch.mean((r_pred - r_gt)**2)
 
         return loss_left + loss_right
     
@@ -327,3 +307,8 @@ class Train:
                 'rmse_log':rmse_log, 'a1': a1, 'a2': a2, 'a3':a3}
 
         return errors
+
+if __name__ == '__main__':
+
+    train = Train()
+    train.train()

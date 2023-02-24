@@ -1,10 +1,11 @@
 class Config(object):
 
-    batch_size = 32
+    batch_size = 16
     epochs = 1
     lr = 1e-2
 
     gpu = True
+    num_workers = 0
 
     model_name = 'my_model.pth'
     log_dir = './outputs/log'
@@ -20,6 +21,6 @@ class Config(object):
     save_f = 1
     scheduler_f = 15
 
-    max_disp = 160
+    maxdisp = 160
 
     split = 'eigen_full'

@@ -11,9 +11,9 @@ class Transform():
             transforms.ToTensor()
         ])
 
-    def __call__(self, img, size):
+    def __call__(self, img):
 
-        img = (img / 255.).astype(np.float32)
+        img = (img.astype(np.float32) / 255.)
         img = self.data_transform(img)
         
         return img
