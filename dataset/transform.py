@@ -1,6 +1,7 @@
 from torchvision import transforms
 from config.config import Config
 import numpy as np
+from PIL import Image
 
 class Transform():
     
@@ -13,7 +14,6 @@ class Transform():
 
     def __call__(self, img):
 
-        img = (img.astype(np.float32) / 255.)
         img = self.data_transform(img)
-        
+
         return img

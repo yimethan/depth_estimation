@@ -89,10 +89,9 @@ class Train:
             # output = {'l_prob':left_prob, 'r_prob':right_prob,
             #     'l_newinp':l_newinp, 'r_newinp':r_newinp,
             #     'l_bbox':left_y, 'r_bbox':right_y}
-            outputs = self.model(inputs['l_img'], inputs['r_img'])
+            outputs = self.model(inputs)
 
-            loss = self.compute_loss(inputs['l_img'], inputs['r_img'],
-                                    outputs['l_prob'], outputs['r_prob'])
+            loss = self.compute_loss(inputs['l_img'], inputs['r_img'], outputs['l_prob'], outputs['r_prob'])
             self.model_optimizer.zero_grad()
             loss.backward()
             self.model_optimizer.step()
@@ -196,7 +195,7 @@ class Train:
             writer.add_scalar('errors_{}/a2/{}'.format(side, errors['left' if side == 2 else 'right']['a2']), self.step)
             writer.add_scalar('errors_{}/a3/{}'.format(side, errors['left' if side == 2 else 'right']['a3']), self.step)
 
-        for j in range(min(4, Config.batch_size)):  # write a maxmimum of four images
+        for j in range(min(4, Config.batch_size)):  # write a maximum of four images
 
             # original images
             writer.add_image("orig_img_2/{}".format(j), inputs['l_img'], self.step)
@@ -246,11 +245,9 @@ class Train:
         l_pred = outputs[("l_pred", 0, 0)]
         r_pred = outputs[('r_pred', 0, 0)]
 
-        l_pred = torch.clamp(F.interpolate(
-            l_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
+        l_pred = torch.clamp(F.interpolate(l_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
         l_pred = l_pred.detach()
-        r_pred = torch.clamp(F.interpolate(
-            r_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
+        r_pred = torch.clamp(F.interpolate(r_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
         r_pred = r_pred.detach()
 
         l_gt = inputs["l_depth"]
@@ -284,7 +281,6 @@ class Train:
 
         return errors
 
-
     def compute_depth_errors(gt, pred):
         """Computation of error metrics between predicted and ground truth depths
         """
@@ -303,10 +299,10 @@ class Train:
 
         sq_rel = torch.mean((gt - pred) ** 2 / gt)
 
-        errors = {'abs_rel':abs_rel, 'sq_rel':sq_rel, 'rmse':rmse,
-                'rmse_log':rmse_log, 'a1': a1, 'a2': a2, 'a3':a3}
+        errors = {'abs_rel': abs_rel, 'sq_rel': sq_rel, 'rmse': rmse, 'rmse_log': rmse_log, 'a1': a1, 'a2': a2, 'a3': a3}
 
         return errors
+
 
 if __name__ == '__main__':
 

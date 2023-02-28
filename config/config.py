@@ -1,6 +1,6 @@
 class Config(object):
 
-    batch_size = 16
+    batch_size = 1
     epochs = 1
     lr = 1e-2
 
@@ -21,6 +21,6 @@ class Config(object):
     save_f = 1
     scheduler_f = 15
 
-    maxdisp = 160
+    maxdisp = 128
 
     split = 'eigen_full'

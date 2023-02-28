@@ -1,6 +1,6 @@
 import os
 import numpy as np
-import cv2
+from PIL import Image
 import torch
 import torch.nn as nn
 import torch.utils.data as data
@@ -41,14 +41,17 @@ class Dataset(data.Dataset):
         
     def __getitem__(self, idx):
 
-        l_img = self.images['l'][idx]
-        r_img = self.images['r'][idx]
+        l_img = Image.open(self.images['l'][idx]).convert('RGB')
+        r_img = Image.open(self.images['r'][idx]).convert('RGB')
 
         l_img = self.transform(l_img)
         r_img = self.transform(r_img)
 
-        l_depth = self.depths['l'][idx]
-        r_depth = self.depths['r'][idx]
+        l_depth = Image.open(self.depths['l'][idx]).convert('RGB')
+        r_depth = Image.open(self.depths['r'][idx]).convert('RGB')
+
+        l_depth = l_depth.resize(self.fullres_shape, Image.NEAREST)
+        r_depth = r_depth.resize(self.fullres_shape, Image.NEAREST)
 
         l_depth = self.transform(l_depth)
         r_depth = self.transform(r_depth)
@@ -78,12 +81,8 @@ class Dataset(data.Dataset):
 
                     if os.path.isfile(full_img_path):
 
-                        depth = cv2.imread(full_depth_path)
-                        depth = cv2.resize(depth, self.fullres_shape, interpolation=cv2.INTER_NEAREST)
-                        self.depths['l' if side == 2 else 'r'].append(depth)
-
-                        img = cv2.imread(full_img_path)
-                        self.images['l' if side == 2 else 'r'].append(img)
+                        self.depths['l' if side == 2 else 'r'].append(full_depth_path)
+                        self.images['l' if side == 2 else 'r'].append(full_img_path)
 '''
 #Values    Name      Description
 ----------------------------------------------------------------------------
