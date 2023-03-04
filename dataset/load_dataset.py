@@ -20,16 +20,14 @@ class Dataset(data.Dataset):
                            [0, 0, 1, 0],
                            [0, 0, 0, 1]], dtype=np.float32)
 
-        self.fullres_shape = (1242, 375)
-
         self.is_train = True
 
         self.dataset_path = Config.dataset_path
         self.height = Config.height
         self.width = Config.width
 
-        self.images = {'l':[], 'r':[]}
-        self.depths = {'l':[], 'r':[]}
+        self.images = {'l': [], 'r': []}
+        self.depths = {'l': [], 'r': []}
         
         self.transform = Transform()
 
@@ -47,14 +45,14 @@ class Dataset(data.Dataset):
         l_img = self.transform(l_img)
         r_img = self.transform(r_img)
 
-        l_depth = Image.open(self.depths['l'][idx]).convert('RGB')
-        r_depth = Image.open(self.depths['r'][idx]).convert('RGB')
-
-        l_depth = l_depth.resize(self.fullres_shape, Image.NEAREST)
-        r_depth = r_depth.resize(self.fullres_shape, Image.NEAREST)
+        l_depth = Image.open(self.depths['l'][idx]).convert('L')
+        r_depth = Image.open(self.depths['r'][idx]).convert('L')
 
         l_depth = self.transform(l_depth)
         r_depth = self.transform(r_depth)
+
+        l_depth = l_depth.view(1, Config.height, Config.width)
+        r_depth = r_depth.view(1, Config.height, Config.width)
 
         item = {'l_img': l_img, 'r_img': r_img,
                 'l_depth': l_depth, 'r_depth': r_depth}

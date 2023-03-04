@@ -38,6 +38,7 @@ class Model(nn.Module):
         # (h, w, 3) -> (3, h, w) -> (1, 3, h, w)
         l_inp = x['l_img'].reshape(1, 3, Config.height, Config.width)
         r_inp = x['r_img'].reshape(1, 3, Config.height, Config.width)
+        # print('l_inp', l_inp.size()) # [1, 3, 512, 512]
 
         with torch.no_grad():
             left_y = self.detect_model(l_inp)
@@ -58,30 +59,58 @@ class Model(nn.Module):
             r_dets = self.ctdet_decode(heads, 40)
             # detections : ([batch_size, K, [xmin, ymin, xmax, ymax, score]])
 
+            l_dets.detach()
+            r_dets.detach()
+
             torch.cuda.synchronize()
 
         # TODO: create new img pair with detect results
-        l_newinp = self.generate_newinp(x['l_img'], l_dets)
-        r_newinp = self.generate_newinp(x['r_img'], r_dets)
+        l_newinp = self.generate_newinp(x['l_img'], l_dets[:][-1])
+        r_newinp = self.generate_newinp(x['r_img'], r_dets[:][-1])
+
+        # print('newinp size', l_newinp.size(), r_newinp.size()) # [1, 3, 512, 512]
 
         # TODO: feed each imgs through depth blocks
         imgl1, imgr1 = self.depth_model(l_inp, r_inp)
         carl1, carr1 = self.depth_model(l_newinp, r_newinp)
 
+        # print('img1 size', imgl1.size(), imgr1.size()) # [1, 32, 128, 128]
+        # print('car1 size', carl1.size(), carr1.size()) # [1, 32, 128, 128]
+
         # TODO: create cost volume
         left_cost, right_cost = self.depth_model.cost_volume(imgl1, imgr1, carl1, carr1)
+
+        # print('cost size', left_cost.size(), right_cost.size()) # [1, 64, 128, 128, 128]
 
         # TODO: 3d conv and deconv
         left_out = self.depth_model.after_cost(left_cost)
         right_out = self.depth_model.after_cost(right_cost)
 
-        # TODO: softmax and return prob
-        left_prob = F.softmax(-left_out, 1)
-        right_prob = F.softmax(-right_out, 1)
-        
-        output = {'l_prob':left_prob, 'r_prob':right_prob,
-                'l_newinp':l_newinp, 'r_newinp':r_newinp,
-                'l_bbox':left_y, 'r_bbox':right_y}
+        # print('out size', left_out.size(), right_out.size()) # [1, 128. 25. 256]
+
+        # TODO: squeeze, apply softmax, and return prob
+        left_squeeze = torch.squeeze(left_out)
+        right_squeeze = torch.squeeze(right_out)
+
+        # print('squeeze size', left_squeeze.size(), right_squeeze.size()) # [128, 256, 256]
+
+        left_softmax = F.softmax(-left_squeeze, dim=0)
+        right_softmax = F.softmax(-right_squeeze, dim=0)
+
+        # print('softmax', left_softmax.size(), right_softmax.size()) # [128, 256, 256]
+
+        d_grid = torch.arange(Config.maxdisp, dtype=torch.float32).reshape(-1, 1, 1)
+        d_grid = d_grid.repeat(1, Config.height//2, Config.width//2)
+
+        # TODO: soft argmin
+        left_prob = torch.sum(torch.mul(left_softmax, d_grid), dim=0, keepdim=True)
+        right_prob = torch.sum(torch.mul(right_softmax, d_grid), dim=0, keepdim=True)
+
+        # print('prob', left_prob.size(), right_prob.size()) # [1, 256, 256]
+
+        output = {'l_pred': left_prob, 'r_pred': right_prob,
+                'l_newinp': l_newinp, 'r_newinp': r_newinp,
+                'l_bbox': l_dets, 'r_bbox': r_dets}
 
         return output
 
@@ -158,53 +187,79 @@ class Model(nn.Module):
             wh[0, i, 0] = wh[0, i, 0] * 4
             wh[0, i, 1] = wh[0, i, 1] * 4
 
-    def generate_newinp(self, img, boxes):
-        
-        # TODO: there are multiple bboxes
-        # generate zero padding img
-        # for each bbox, if index loc == car area,
-        #   newinp[x][y] = inp img[x][y]
+    def generate_newgt(self, gt, boxes):
+
+        print('gen newgt', gt.size()) # [1, 1, 512, 512]
 
         # [xmin, ymin, xmax, ymax, score]
 
-        boxes = boxes[:][:-1] # without score
+        gt = torch.squeeze(gt, 0)
 
-        newinp = torch.zeros(3, Config.height, Config.width)
+        newimg = Image.new('L', (Config.width, Config.height))
 
         for box in boxes:
 
             bbox = (int(torch.round(x)) for x in box)
-            print(box)
+            bbox = list(bbox)
 
-            # plt.imshow('bbox', self.draw_bbox(img, box))
-            # plt.xticks([]), plt.yticks([])
-            # plt.show()
+            to_paste = transforms.functional.to_pil_image(gt)
+            to_paste = to_paste.crop((bbox[0], bbox[3], bbox[2], bbox[1])) # left, top, right, bottom
 
-            # for x in range(Config.width):
-            #     for y in range(Config.height):
-                    # if (x >= box[0]) or (x <= box[2]) or (y <= box[3]) or (y >= box[1]):
-                        # newinp[:][x][y] = img[:][x][y]
+            newimg.paste(to_paste, box=(bbox[3], bbox[0]))
 
-            newinp[:, bbox[0]:bbox[2], bbox[1]:bbox[3]] = img[:, bbox[0]:bbox[2], bbox[1]:bbox[3]]
+        newgt = transforms.ToTensor()(newimg)
+        newgt = newgt.view(1, 1, Config.height, Config.width)
 
-        newinp = newinp.reshape(1, 3, Config.height, Config.width)
+        return newgt
+
+    def generate_newpred(self, pred, boxes):
+
+        print('gen pred', pred.size()) # [1, 256, 256]
+
+        boxes = boxes * 0.5
+
+        newimg = Image.new('L', (Config.width//2, Config.height//2))
+
+        for box in boxes:
+
+            bbox = (int(torch.round(x)) for x in box)
+            bbox = list(bbox)
+
+            to_paste = transforms.functional.to_pil_image(pred)
+            to_paste = to_paste.crop((bbox[0], bbox[3], bbox[2], bbox[1]))  # left, top, right, bottom
+
+            newimg.paste(to_paste, box=(bbox[3], bbox[0]))
+
+        newpred = transforms.ToTensor()(newimg)
+        newpred = newpred.view(1, Config.height//2, Config.width//2)
+
+        print('newpred', newpred.size()) # [1, 256, 256]
+
+        return newpred
+
+    def generate_newinp(self, img, boxes):
+        
+        # [xmin, ymin, xmax, ymax, score]
+
+        # print(img.size()) # [1, 3, 512, 512]
+        img = torch.squeeze(img)
+
+        newimg = Image.new('RGB', (Config.width, Config.height))
+
+        for box in boxes:
+
+            bbox = (int(torch.round(x)) for x in box)
+            bbox = list(bbox)
+
+            to_paste = transforms.functional.to_pil_image(img)
+            to_paste = to_paste.crop((bbox[0], bbox[3], bbox[2], bbox[1]))  # left, top, right, bottom
+
+            newimg.paste(to_paste, box=(bbox[3], bbox[0]))
+
+        newinp = transforms.ToTensor()(newimg) # [3, 512, 512]
+        newinp = newinp.view(1, 3, Config.height, Config.width)
 
         return newinp
-
-    # def draw_bbox(self, image, detections):
-    #     ''' Given the original image and detections results (after threshold)
-    #         Draw bounding boxes on the image
-    #     '''
-    #     image = np.asarray(image)
-    #     height = image.shape[0]
-    #     width = image.shape[1]
-    #     for i in range(detections.shape[0]):
-    #         cv2.rectangle(image, \
-    #                       (detections[i, 0], detections[i, 1]), \
-    #                       (detections[i, 2], detections[i, 3]), \
-    #                       (0, 255, 0), 1)
-    #
-    #     return image
     
 class BasicBlock(nn.Module):
 
@@ -256,17 +311,17 @@ class DepthBlock(nn.Module):
         self.in_planes = 32
         self.feature_size = 32
 
-        #first two conv2d
+        # first two conv2d
         self.conv0 = nn.Conv2d(3, 32, 5, 2, 2)
         self.bn0 = nn.BatchNorm2d(32)
 
-        #res block
+        # res block
         self.res_block = self._make_layer(block, self.in_planes, 32, num_block[0], stride=1)
 
-        #last conv2d
+        # ast conv2d
         self.conv1 = nn.Conv2d(32, 32, 3, 1, 1)
 
-        #conv3d
+        # conv3d
         self.conv3d_1 = nn.Conv3d(64, 32, 3, 1, 1)
         self.bn3d_1 = nn.BatchNorm3d(32)
         self.conv3d_2 = nn.Conv3d(32, 32, 3, 1, 1)
@@ -279,13 +334,13 @@ class DepthBlock(nn.Module):
         self.conv3d_5 = nn.Conv3d(64, 64, 3, 2, 1)
         self.bn3d_5 = nn.BatchNorm3d(64)
 
-        #conv3d sub_sample block
+        # conv3d sub_sample block
         self.block_3d_1 = self._make_layer(block_3d, 64, 64, num_block[1],stride=2)
         self.block_3d_2 = self._make_layer(block_3d, 64, 64, num_block[1], stride=2)
         self.block_3d_3 = self._make_layer(block_3d, 64, 64, num_block[1], stride=2)
         self.block_3d_4 = self._make_layer(block_3d, 64, 128, num_block[1], stride=2)
 
-        #deconv3d
+        # deconv3d
         self.deconv1=nn.ConvTranspose3d(128, 64, 3, 2, 1, 1)
         self.debn1=nn.BatchNorm3d(64)
         self.deconv2 = nn.ConvTranspose3d(64, 64, 3, 2, 1, 1)
@@ -295,8 +350,10 @@ class DepthBlock(nn.Module):
         self.deconv4 = nn.ConvTranspose3d(64, 32, 3, 2, 1, 1)
         self.debn4 = nn.BatchNorm3d(32)
 
-        #last deconv3d
+        # last deconv3d
         self.deconv5 = nn.ConvTranspose3d(32, 1, 3, 2, 1, 1)
+
+        self.maxpool = nn.MaxPool3d((2, 1, 1))
     
     def _make_layer(self, block, in_planes, planes, num_block, stride):
         strides = [stride] + [1] * (num_block - 1)
@@ -307,8 +364,12 @@ class DepthBlock(nn.Module):
 
     def forward(self, imgLeft, imgRight):
 
+        # print('orig depth model input img size', imgLeft.size(), imgRight.size()) # [1, 3, 512, 512]
+
         imgLeft = transforms.functional.resize(imgLeft, (Config.height // 2, Config.width // 2))
         imgRight = transforms.functional.resize(imgRight, (Config.height // 2, Config.width // 2))
+
+        # print('resized depth input img size', imgLeft.size(), imgRight.size()) # [1, 3, 256, 256]
         
         imgl0 = F.relu(self.bn0(self.conv0(imgLeft)))
         imgr0 = F.relu(self.bn0(self.conv0(imgRight)))
@@ -326,7 +387,7 @@ class DepthBlock(nn.Module):
         conv3d_out = F.relu(self.bn3d_1(self.conv3d_1(cost_volume)))
         conv3d_out = F.relu(self.bn3d_2(self.conv3d_2(conv3d_out)))
 
-        #conv3d block
+        # conv3d block
         conv3d_block_1 = self.block_3d_1(cost_volume)
         conv3d_21 = F.relu(self.bn3d_3(self.conv3d_3(cost_volume)))
         conv3d_block_2 = self.block_3d_2(conv3d_21)
@@ -335,15 +396,17 @@ class DepthBlock(nn.Module):
         conv3d_27 = F.relu(self.bn3d_5(self.conv3d_5(conv3d_24)))
         conv3d_block_4 = self.block_3d_4(conv3d_27)
         
-        #deconv
+        # deconv
         deconv3d = F.relu(self.debn1(self.deconv1(conv3d_block_4))+conv3d_block_3)
         deconv3d = F.relu(self.debn2(self.deconv2(deconv3d))+conv3d_block_2)
         deconv3d = F.relu(self.debn3(self.deconv3(deconv3d))+conv3d_block_1)
         deconv3d = F.relu(self.debn4(self.deconv4(deconv3d))+conv3d_out)
 
-        #last deconv3d
-        deconv3d = self.deconv5(deconv3d)
-        out = deconv3d.view(1, self.maxdisp, Config.height, Config.width)
+        # last deconv3d
+        deconv3d = self.deconv5(deconv3d) # [1, 1, 256, 256, 256]
+        maxpooling = self.maxpool(deconv3d) # [1, 1, 128, 256, 256]
+
+        out = maxpooling.view(1, Config.maxdisp, Config.height//2, Config.width//2) # [1, 128, 256, 256]
 
         return out
 
@@ -387,7 +450,7 @@ class DepthBlock(nn.Module):
                 # print(leftplusright.size(), rightplusleft.size()) # [1, 128, 128, 128]
 
             left_list.append(leftplusright)
-            right_list.append(rightplusleft) # len 80
+            right_list.append(rightplusleft)
 
         left_cost = torch.stack(left_list, axis=1)
         right_cost = torch.stack(right_list, axis=1)

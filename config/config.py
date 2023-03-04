@@ -17,6 +17,9 @@ class Config(object):
     height = 512
     width = 512
 
+    original_height = 372
+    original_width = 1242
+
     log_f = 125
     save_f = 1
     scheduler_f = 15
