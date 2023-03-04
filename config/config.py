@@ -1,48 +1,26 @@
 class Config(object):
 
-    batch_size = 32
+    batch_size = 1
     epochs = 1
-
-    model_name = 'my_model.pth'
-    
-    root = '../dataset/raw_data'
-
-    resize_size = [512, 512]
-    height = 512
-    width = 512
-
-    optimizer = 'AdamW'
     lr = 1e-2
-    AMSGRAD = True
 
     gpu = True
-    eval = True
+    num_workers = 0
 
-    log_dir = './results/log'
-    checkpoint_dir = './results/ckp'
+    model_name = 'my_model.pth'
+    log_dir = './outputs/log'
+    checkpoint_dir = './outputs/ckp'
 
     centernet_path = '../centernet-models/best.pth'
+    dataset_path = '../dataset/raw_data'
 
-    num_workers = 12
-    split = 'eigen_zhou'
-    use_stereo = True
+    height = 128
+    width = 128
 
-    log_frequency = 125 # num of batches between each tensorboard log 250
-    save_frequency = 1 # num of epochs between each save 1
+    log_f = 125
+    save_f = 1
+    scheduler_f = 15
 
-    pred_depth_scale_factor = 1
-    eval_split = 'eigen'
+    maxdisp = 128
 
-    max_disp = 160 # 100?
-
-    png = True
-    scheduler_step_size = 15
-    max_iter = None
-    steps = None
-
-    use_stereo = True
-    frame_ids = [0, -1, 1]
-    scales = [0, 1, 2, 3]
-
-    no_cuda = False
-    load_weights_folder = None
+    split = 'eigen_full'

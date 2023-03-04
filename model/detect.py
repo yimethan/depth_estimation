@@ -1,273 +1,592 @@
-from DLAnet import DlaNet
+''' Adapted from https://github.com/ZeroE04/R-CenterNet/
+'''
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
+import math
+from os.path import join
+
 import torch
-import cv2
+from torch import nn
+import torch.utils.model_zoo as model_zoo
+
 import numpy as np
-from utils import *
-from dataset import ctDataset
-import os
-from torch.utils.data import DataLoader
 
-class Predictor:
-    def __init__(self, use_gpu):
-        # Todo: the mean and std need to be modified according to our dataset
-        # self.mean_ = np.array([0.5194416012442385, 0.5378052387430711, 0.533462090585746], \
-        #                 dtype=np.float32).reshape(1, 1, 3)
-        # self.std_  = np.array([0.3001546018824507, 0.28620901391179554, 0.3014112676161966], \
-        #                 dtype=np.float32).reshape(1, 1, 3)
+BatchNorm = nn.BatchNorm2d
+
+def get_model_url(data='imagenet', name='dla34', hash='ba72cf86'):
+    return join('http://dl.yf.io/dla/models', data, '{}-{}.pth'.format(name, hash))
+
+
+def conv3x3(in_planes, out_planes, stride=1):
+    "3x3 convolution with padding"
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=1, bias=False)
+
+
+class BasicBlock(nn.Module):
+    def __init__(self, inplanes, planes, stride=1, dilation=1):
+        super(BasicBlock, self).__init__()
+        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=3,
+                               stride=stride, padding=dilation,
+                               bias=False, dilation=dilation)
+        self.bn1 = BatchNorm(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3,
+                               stride=1, padding=dilation,
+                               bias=False, dilation=dilation)
+        self.bn2 = BatchNorm(planes)
+        self.stride = stride
+
+    def forward(self, x, residual=None):
+        if residual is None:
+            residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+
+class Bottleneck(nn.Module):
+    expansion = 2
+
+    def __init__(self, inplanes, planes, stride=1, dilation=1):
+        super(Bottleneck, self).__init__()
+        expansion = Bottleneck.expansion
+        bottle_planes = planes // expansion
+        self.conv1 = nn.Conv2d(inplanes, bottle_planes,
+                               kernel_size=1, bias=False)
+        self.bn1 = BatchNorm(bottle_planes)
+        self.conv2 = nn.Conv2d(bottle_planes, bottle_planes, kernel_size=3,
+                               stride=stride, padding=dilation,
+                               bias=False, dilation=dilation)
+        self.bn2 = BatchNorm(bottle_planes)
+        self.conv3 = nn.Conv2d(bottle_planes, planes,
+                               kernel_size=1, bias=False)
+        self.bn3 = BatchNorm(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.stride = stride
+
+    def forward(self, x, residual=None):
+        if residual is None:
+            residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+
+class BottleneckX(nn.Module):
+    expansion = 2
+    cardinality = 32
+
+    def __init__(self, inplanes, planes, stride=1, dilation=1):
+        super(BottleneckX, self).__init__()
+        cardinality = BottleneckX.cardinality
+        # dim = int(math.floor(planes * (BottleneckV5.expansion / 64.0)))
+        # bottle_planes = dim * cardinality
+        bottle_planes = planes * cardinality // 32
+        self.conv1 = nn.Conv2d(inplanes, bottle_planes,
+                               kernel_size=1, bias=False)
+        self.bn1 = BatchNorm(bottle_planes)
+        self.conv2 = nn.Conv2d(bottle_planes, bottle_planes, kernel_size=3,
+                               stride=stride, padding=dilation, bias=False,
+                               dilation=dilation, groups=cardinality)
+        self.bn2 = BatchNorm(bottle_planes)
+        self.conv3 = nn.Conv2d(bottle_planes, planes,
+                               kernel_size=1, bias=False)
+        self.bn3 = BatchNorm(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.stride = stride
+
+    def forward(self, x, residual=None):
+        if residual is None:
+            residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+
+class Root(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, residual):
+        super(Root, self).__init__()
+        self.conv = nn.Conv2d(
+            in_channels, out_channels, 1,
+            stride=1, bias=False, padding=(kernel_size - 1) // 2)
+        self.bn = BatchNorm(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.residual = residual
+
+    def forward(self, *x):
+        children = x
+        x = self.conv(torch.cat(x, 1))
+        x = self.bn(x)
+        if self.residual:
+            x += children[0]
+        x = self.relu(x)
+
+        return x
+
+
+class Tree(nn.Module):
+    def __init__(self, levels, block, in_channels, out_channels, stride=1,
+                 level_root=False, root_dim=0, root_kernel_size=1,
+                 dilation=1, root_residual=False):
+        super(Tree, self).__init__()
+        if root_dim == 0:
+            root_dim = 2 * out_channels
+        if level_root:
+            root_dim += in_channels
+        if levels == 1:
+            self.tree1 = block(in_channels, out_channels, stride,
+                               dilation=dilation)
+            self.tree2 = block(out_channels, out_channels, 1,
+                               dilation=dilation)
+        else:
+            self.tree1 = Tree(levels - 1, block, in_channels, out_channels,
+                              stride, root_dim=0,
+                              root_kernel_size=root_kernel_size,
+                              dilation=dilation, root_residual=root_residual)
+            self.tree2 = Tree(levels - 1, block, out_channels, out_channels,
+                              root_dim=root_dim + out_channels,
+                              root_kernel_size=root_kernel_size,
+                              dilation=dilation, root_residual=root_residual)
+        if levels == 1:
+            self.root = Root(root_dim, out_channels, root_kernel_size,
+                             root_residual)
+        self.level_root = level_root
+        self.root_dim = root_dim
+        self.downsample = None
+        self.project = None
+        self.levels = levels
+        if stride > 1:
+            self.downsample = nn.MaxPool2d(stride, stride=stride)
+        if in_channels != out_channels:
+            self.project = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels,
+                          kernel_size=1, stride=1, bias=False),
+                BatchNorm(out_channels)
+            )
+
+    def forward(self, x, residual=None, children=None):
+        children = [] if children is None else children
+        bottom = self.downsample(x) if self.downsample else x
+        residual = self.project(bottom) if self.project else bottom
+        if self.level_root:
+            children.append(bottom)
+        x1 = self.tree1(x, residual)
+        if self.levels == 1:
+            x2 = self.tree2(x1)
+            x = self.root(x2, x1, *children)
+        else:
+            children.append(x1)
+            x = self.tree2(x1, children=children)
+        return x
+
+
+class DLA(nn.Module):
+    def __init__(self, levels, channels, num_classes=1000,
+                 block=BasicBlock, residual_root=False, return_levels=False,
+                 pool_size=7, linear_root=False):
+        super(DLA, self).__init__()
+        self.channels = channels
+        self.return_levels = return_levels
+        self.num_classes = num_classes
+        self.base_layer = nn.Sequential(
+            nn.Conv2d(3, channels[0], kernel_size=7, stride=1,
+                      padding=3, bias=False),
+            BatchNorm(channels[0]),
+            nn.ReLU(inplace=True))
+        self.level0 = self._make_conv_level(
+            channels[0], channels[0], levels[0])
+        self.level1 = self._make_conv_level(
+            channels[0], channels[1], levels[1], stride=2)
+        self.level2 = Tree(levels[2], block, channels[1], channels[2], 2,
+                           level_root=False,
+                           root_residual=residual_root)
+        self.level3 = Tree(levels[3], block, channels[2], channels[3], 2,
+                           level_root=True, root_residual=residual_root)
+        self.level4 = Tree(levels[4], block, channels[3], channels[4], 2,
+                           level_root=True, root_residual=residual_root)
+        self.level5 = Tree(levels[5], block, channels[4], channels[5], 2,
+                           level_root=True, root_residual=residual_root)
+
+        self.avgpool = nn.AvgPool2d(pool_size)
+        self.fc = nn.Conv2d(channels[-1], num_classes, kernel_size=1,
+                            stride=1, padding=0, bias=True)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, BatchNorm):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+
+    def _make_level(self, block, inplanes, planes, blocks, stride=1):
+        downsample = None
+        if stride != 1 or inplanes != planes:
+            downsample = nn.Sequential(
+                nn.MaxPool2d(stride, stride=stride),
+                nn.Conv2d(inplanes, planes,
+                          kernel_size=1, stride=1, bias=False),
+                BatchNorm(planes),
+            )
+
+        layers = []
+        layers.append(block(inplanes, planes, stride, downsample=downsample))
+        for i in range(1, blocks):
+            layers.append(block(inplanes, planes))
+
+        return nn.Sequential(*layers)
+
+    def _make_conv_level(self, inplanes, planes, convs, stride=1, dilation=1):
+        modules = []
+        for i in range(convs):
+            modules.extend([
+                nn.Conv2d(inplanes, planes, kernel_size=3,
+                          stride=stride if i == 0 else 1,
+                          padding=dilation, bias=False, dilation=dilation),
+                BatchNorm(planes),
+                nn.ReLU(inplace=True)])
+            inplanes = planes
+        return nn.Sequential(*modules)
+
+    def forward(self, x):
+        y = []
+        x = self.base_layer(x)
+        for i in range(6):
+            x = getattr(self, 'level{}'.format(i))(x)
+            y.append(x)
+        if self.return_levels:
+            return y
+        else:
+            x = self.avgpool(x)
+            x = self.fc(x)
+            x = x.view(x.size(0), -1)
+
+            return x
+
+    def load_pretrained_model(self,  data='imagenet', name='dla34', hash='ba72cf86'):
+        fc = self.fc
+        if name.endswith('.pth'):
+            model_weights = torch.load(data + name)
+        else:
+            model_url = get_model_url(data, name, hash)
+            model_weights = model_zoo.load_url(model_url)
+        num_classes = len(model_weights[list(model_weights.keys())[-1]])
+        self.fc = nn.Conv2d(
+            self.channels[-1], num_classes,
+            kernel_size=1, stride=1, padding=0, bias=True)
+        self.load_state_dict(model_weights)
+        self.fc = fc
+
+
+def dla34(pretrained, **kwargs):  # DLA-34
+    model = DLA([1, 1, 1, 2, 2, 1],
+                [16, 32, 64, 128, 256, 512],
+                block=BasicBlock, **kwargs)
+    if pretrained:
+        model.load_pretrained_model(data='imagenet', name='dla34', hash='ba72cf86')
+    return model
+
+
+def dla46_c(pretrained=None, **kwargs):  # DLA-46-C
+    Bottleneck.expansion = 2
+    model = DLA([1, 1, 1, 2, 2, 1],
+                [16, 32, 64, 64, 128, 256],
+                block=Bottleneck, **kwargs)
+    if pretrained is not None:
+        model.load_pretrained_model(pretrained, 'dla46_c')
+    return model
+
+
+def dla46x_c(pretrained=None, **kwargs):  # DLA-X-46-C
+    BottleneckX.expansion = 2
+    model = DLA([1, 1, 1, 2, 2, 1],
+                [16, 32, 64, 64, 128, 256],
+                block=BottleneckX, **kwargs)
+    if pretrained is not None:
+        model.load_pretrained_model(pretrained, 'dla46x_c')
+    return model
+
+
+def dla60x_c(pretrained, **kwargs):  # DLA-X-60-C
+    BottleneckX.expansion = 2
+    model = DLA([1, 1, 1, 2, 3, 1],
+                [16, 32, 64, 64, 128, 256],
+                block=BottleneckX, **kwargs)
+    if pretrained:
+        model.load_pretrained_model(data='imagenet', name='dla60x_c', hash='b870c45c')
+    return model
+
+
+def dla60(pretrained=None, **kwargs):  # DLA-60
+    Bottleneck.expansion = 2
+    model = DLA([1, 1, 1, 2, 3, 1],
+                [16, 32, 128, 256, 512, 1024],
+                block=Bottleneck, **kwargs)
+    if pretrained is not None:
+        model.load_pretrained_model(pretrained, 'dla60')
+    return model
+
+
+def dla60x(pretrained=None, **kwargs):  # DLA-X-60
+    BottleneckX.expansion = 2
+    model = DLA([1, 1, 1, 2, 3, 1],
+                [16, 32, 128, 256, 512, 1024],
+                block=BottleneckX, **kwargs)
+    if pretrained is not None:
+        model.load_pretrained_model(pretrained, 'dla60x')
+    return model
+
+
+def dla102(pretrained=None, **kwargs):  # DLA-102
+    Bottleneck.expansion = 2
+    model = DLA([1, 1, 1, 3, 4, 1], [16, 32, 128, 256, 512, 1024],
+                block=Bottleneck, residual_root=True, **kwargs)
+    if pretrained is not None:
+        model.load_pretrained_model(pretrained, 'dla102')
+    return model
+
+
+def dla102x(pretrained=None, **kwargs):  # DLA-X-102
+    BottleneckX.expansion = 2
+    model = DLA([1, 1, 1, 3, 4, 1], [16, 32, 128, 256, 512, 1024],
+                block=BottleneckX, residual_root=True, **kwargs)
+    if pretrained is not None:
+        model.load_pretrained_model(pretrained, 'dla102x')
+    return model
+
+
+def dla102x2(pretrained=None, **kwargs):  # DLA-X-102 64
+    BottleneckX.cardinality = 64
+    model = DLA([1, 1, 1, 3, 4, 1], [16, 32, 128, 256, 512, 1024],
+                block=BottleneckX, residual_root=True, **kwargs)
+    if pretrained is not None:
+        model.load_pretrained_model(pretrained, 'dla102x2')
+    return model
+
+
+def dla169(pretrained=None, **kwargs):  # DLA-169
+    Bottleneck.expansion = 2
+    model = DLA([1, 1, 2, 3, 5, 1], [16, 32, 128, 256, 512, 1024],
+                block=Bottleneck, residual_root=True, **kwargs)
+    if pretrained is not None:
+        model.load_pretrained_model(pretrained, 'dla169')
+    return model
+
+
+def set_bn(bn):
+    global BatchNorm
+    BatchNorm = bn
+    dla.BatchNorm = bn
+
+
+class Identity(nn.Module):
+    def __init__(self):
+        super(Identity, self).__init__()
+
+    def forward(self, x):
+        return x
+
+
+def fill_up_weights(up):
+    w = up.weight.data
+    f = math.ceil(w.size(2) / 2)
+    c = (2 * f - 1 - f % 2) / (2. * f)
+    for i in range(w.size(2)):
+        for j in range(w.size(3)):
+            w[0, 0, i, j] = \
+                (1 - math.fabs(i / f - c)) * (1 - math.fabs(j / f - c))
+    for c in range(1, w.size(0)):
+        w[c, 0, :, :] = w[0, 0, :, :]
+
+
+class IDAUp(nn.Module):
+    def __init__(self, node_kernel, out_dim, channels, up_factors):
+        super(IDAUp, self).__init__()
+        self.channels = channels
+        self.out_dim = out_dim
+        for i, c in enumerate(channels):
+            if c == out_dim:
+                proj = Identity()
+            else:
+                proj = nn.Sequential(
+                    nn.Conv2d(c, out_dim,
+                              kernel_size=1, stride=1, bias=False),
+                    BatchNorm(out_dim),
+                    nn.ReLU(inplace=True))
+            f = int(up_factors[i])
+            if f == 1:
+                up = Identity()
+            else:
+                up = nn.ConvTranspose2d(
+                    out_dim, out_dim, f * 2, stride=f, padding=f // 2,
+                    output_padding=0, groups=out_dim, bias=False)
+                fill_up_weights(up)
+            setattr(self, 'proj_' + str(i), proj)
+            setattr(self, 'up_' + str(i), up)
+
+        for i in range(1, len(channels)):
+            node = nn.Sequential(
+                nn.Conv2d(out_dim * 2, out_dim,
+                          kernel_size=node_kernel, stride=1,
+                          padding=node_kernel // 2, bias=False),
+                BatchNorm(out_dim),
+                nn.ReLU(inplace=True))
+            setattr(self, 'node_' + str(i), node)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, BatchNorm):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+
+    def forward(self, layers):
+        assert len(self.channels) == len(layers), \
+            '{} vs {} layers'.format(len(self.channels), len(layers))
+        layers = list(layers)
+        for i, l in enumerate(layers):
+            upsample = getattr(self, 'up_' + str(i))
+            project = getattr(self, 'proj_' + str(i))
+            layers[i] = upsample(project(l))
+        x = layers[0]
+        y = []
+        for i in range(1, len(layers)):
+            node = getattr(self, 'node_' + str(i))
+            x = node(torch.cat([x, layers[i]], 1))
+            y.append(x)
+        return x, y
+
+
+class DLAUp(nn.Module):
+    def __init__(self, channels, scales=(1, 2, 4, 8, 16), in_channels=None):
+        super(DLAUp, self).__init__()
+        if in_channels is None:
+            in_channels = channels
+        self.channels = channels
+        channels = list(channels)
+        scales = np.array(scales, dtype=int)
+        for i in range(len(channels) - 1):
+            j = -i - 2
+            setattr(self, 'ida_{}'.format(i),
+                    IDAUp(3, channels[j], in_channels[j:],
+                          scales[j:] // scales[j]))
+            scales[j + 1:] = scales[j]
+            in_channels[j + 1:] = [channels[j] for _ in channels[j + 1:]]
+
+    def forward(self, layers):
+        layers = list(layers)
+        assert len(layers) > 1
+        for i in range(len(layers) - 1):
+            ida = getattr(self, 'ida_{}'.format(i))
+            x, y = ida(layers[-i - 2:])
+            layers[-i - 1:] = y
+        return x
+
+def fill_fc_weights(layers):
+    for m in layers.modules():
+        if isinstance(m, nn.Conv2d):
+            nn.init.normal_(m.weight, std=0.001)
+            # torch.nn.init.kaiming_normal_(m.weight.data, nonlinearity='relu')
+            # torch.nn.init.xavier_normal_(m.weight.data)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+class Creat_DlaNet(nn.Module):
+    def __init__(self, base_name, heads,
+                 pretrained=True, plot=False, down_ratio=4, head_conv=256):
+        super(Creat_DlaNet, self).__init__()
+        assert down_ratio in [2, 4, 8, 16]
+        self.heads = heads
+        self.plot = plot
+        self.first_level = int(np.log2(down_ratio))
+        self.base = globals()[base_name](
+          pretrained=pretrained, return_levels=True)
+        channels = self.base.channels
+        scales = [2 ** i for i in range(len(channels[self.first_level:]))]
+        self.dla_up = DLAUp(channels[self.first_level:], scales=scales)
+
+        for head in self.heads:
+            classes = self.heads[head]
+            if head_conv > 0:
+                fc = nn.Sequential(
+                  nn.Conv2d(channels[self.first_level], head_conv,
+                    kernel_size=3, padding=1, bias=True),
+                  nn.ReLU(inplace=True),
+                  nn.Conv2d(head_conv, classes, 
+                    kernel_size=1, stride=1, 
+                    padding=0, bias=True))
+                if 'hm' in head:
+                    fc[-1].bias.data.fill_(-2.19)
+                else:
+                    fill_fc_weights(fc)
+            else:
+                fc = nn.Conv2d(channels[self.first_level], classes, 
+                  kernel_size=1, stride=1, 
+                  padding=0, bias=True)
+                if 'hm' in head:
+                    fc.bias.data.fill_(-2.19)
+                else:
+                    fill_fc_weights(fc)
+            self.__setattr__(head, fc)
+
+    def forward(self, x):
+        x = self.base(x)
+        x = self.dla_up(x[self.first_level:])
+        # x = self.fc(x)
+        # y = self.softmax(self.up(x))
         
-        # input image size
-        self.inp_width_  = 512
-        self.inp_height_ = 512
-
-        # confidence threshold
-        self.thresh_ = 0.35
-
-        self.use_gpu_ = use_gpu
-
-    def nms(self, heat, kernel=3):
-        ''' Non-maximal supression
-        '''
-        pad = (kernel - 1) // 2
-        hmax = torch.nn.functional.max_pool2d(
-            heat, (kernel, kernel), stride=1, padding=pad)
-        # hmax == heat when this point is local maximal
-        keep = (hmax == heat).float()
-        return heat * keep
-
-    def find_top_k(self, heat, K):
-        ''' Find top K key points (centers) in the headmap
-        '''
-        batch, cat, height, width = heat.size()
-        topk_scores, topk_inds = torch.topk(heat.view(batch, cat, -1), K)
-        topk_inds = topk_inds % (height * width)
-        topk_ys   = (topk_inds // width).int().float()
-        topk_xs   = (topk_inds % width).int().float() 
-        topk_score, topk_ind = torch.topk(topk_scores.view(batch, -1), K)
-        topk_inds = gather_feat(
-            topk_inds.view(batch, -1, 1), topk_ind).view(batch, K)
-        topk_ys = gather_feat(topk_ys.view(batch, -1, 1), topk_ind).view(batch, K)
-        topk_xs = gather_feat(topk_xs.view(batch, -1, 1), topk_ind).view(batch, K)
-
-        return topk_score, topk_inds, topk_ys, topk_xs
-
-    def pre_process(self, image):
-        ''' Preprocess the image
-
-            Args:
-                image - the image that need to be preprocessed
-            Return:
-                images (tensor) - images have the shape (1，3，h，w)
-        '''
-        height = image.shape[0]
-        width = image.shape[1]
-
-        plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        plt.show()
-
-        # shrink the image size and normalize here
-        inp_image = cv2.resize(image,(self.inp_width_, self.inp_height_))
-
-        plt.imshow(cv2.cvtColor(inp_image, cv2.COLOR_BGR2RGB))
-        plt.show()
-
-        # inp_image = ((inp_image / 255. - self.mean_) / self.std_).astype(np.float32)
-        inp_image = (inp_image / 255.).astype(np.float32)
-
-        # from three to four dimension 
-        # (h, w, 3) -> (3, h, w) -> (1，3，h，w)
-        images = inp_image.transpose(2, 0, 1).reshape(1, 3, self.inp_height_, self.inp_width_)
-        images = torch.from_numpy(images)
-
-        return images
-
-    def post_process(self, xs, ys, wh, reg):
-        ''' (Will modify args) Transfer all xs, ys, wh from heatmap size to input size
-        '''
-        for i in range(xs.size()[1]):
-            xs[0, i, 0] = xs[0, i, 0] * 4
-            ys[0, i, 0] = ys[0, i, 0] * 4
-            wh[0, i, 0] = wh[0, i, 0] * 4
-            wh[0, i, 1] = wh[0, i, 1] * 4
+        ret = {}
+        res = [] 
+        for head in self.heads:
+            ret[head] = self.__getattr__(head)(x)
+            res.append(self.__getattr__(head)(x))
+        return res if self.plot else ret
 
 
-    def ctdet_decode(self, heads, K = 40):
-        ''' Decoding the output
-
-            Args:
-                heads ([heatmap, width/height, regression]) - network results
-            Return:
-                detections([batch_size, K, [xmin, ymin, xmax, ymax, score]]) 
-        '''
-        heat, wh, reg = heads
-
-        batch, cat, height, width = heat.size()
-
-        if (not self.use_gpu_):
-            plot_heapmap(heat[0,0,:,:])
-
-        heat = self.nms(heat)
-
-        if (not self.use_gpu_):
-            plot_heapmap(heat[0,0,:,:])
-
-        scores, inds, ys, xs = self.find_top_k(heat, K)
-        reg = transpose_and_gather_feat(reg, inds)
-        reg = reg.view(batch, K, 2)
-        xs = xs.view(batch, K, 1) + reg[:, :, 0:1]
-        ys = ys.view(batch, K, 1) + reg[:, :, 1:2]
-
-        wh = transpose_and_gather_feat(wh, inds)
-        wh = wh.view(batch, K, 2)
-
-        self.post_process(xs, ys, wh, reg)
-        
-        scores = scores.view(batch, K, 1)
-        bboxes = torch.cat([xs - wh[..., 0:1] / 2, 
-                            ys - wh[..., 1:2] / 2,
-                            xs + wh[..., 0:1] / 2, 
-                            ys + wh[..., 1:2] / 2], dim=2)
-        detections = torch.cat([bboxes, scores], dim=2)
-        
-        return detections
-
-    def draw_bbox(self, image, detections):
-        ''' Given the original image and detections results (after threshold)
-            Draw bounding boxes on the image
-        '''
-        height = image.shape[0]
-        width = image.shape[1]
-        inp_image = cv2.resize(image,(self.inp_width_, self.inp_height_))
-        for i in range(detections.shape[0]):
-            cv2.rectangle(inp_image, \
-                        (detections[i,0],detections[i,1]), \
-                        (detections[i,2],detections[i,3]), \
-                        (0,255,0), 1)
-
-        original_image = cv2.resize(inp_image,(width, height))
-
-        return original_image
-
-
-    def process(self, images):
-        ''' The prediction process
-
-            Args:
-                images - input images (preprocessed)
-            Returns:
-                output - result from the network
-        '''
-        with torch.no_grad():
-            output = model(images)
-            hm = output['hm'].sigmoid_()
-            wh = output['wh']
-            reg = output['reg']
-
-            # Generate GT data for testing
-            # hm, wh, reg = generate_gt_data(400)
-
-            heads = [hm, wh, reg]
-            if (self.use_gpu_):
-                torch.cuda.synchronize()
-            dets = self.ctdet_decode(heads, 40) # K is the number of remaining instances
-
-        return output, dets
-    
-    def input2image(self, detection):
-        ''' Transform the detections results from input coordinate (512*512) to original image coordinate
-
-            x is in width direction, y is height
-        '''
-        default_resolution = [375, 1242]
-        det_original = np.copy(detection)
-        det_original[:, 0] = det_original[:, 0] / self.inp_width_ * default_resolution[1]
-        det_original[:, 2] = det_original[:, 2] / self.inp_width_ * default_resolution[1]
-        det_original[:, 1] = det_original[:, 1] / self.inp_width_ * default_resolution[0]
-        det_original[:, 3] = det_original[:, 3] / self.inp_width_ * default_resolution[0]
-
-        return det_original
-
-if __name__ == '__main__':
-
-    use_gpu = torch.cuda.is_available()
-    print("Use CUDA? ", use_gpu)
-
-    model = DlaNet(34)
-    device = None
-    if (use_gpu):
-        # os.environ["CUDA_VISIBLE_DEVICES"] = '0' 
-        # model = nn.DataParallel(model)
-        # print('Using ', torch.cuda.device_count(), "CUDAs")
-        print('cuda', torch.cuda.current_device(), torch.cuda.device_count())
-        device = torch.device('cuda:1')
-        model.load_state_dict(torch.load('../best.pth'))
-        model.to(device)
-    else:
-        device = torch.device('cpu')
-        model.load_state_dict(torch.load('../best.pth', map_location=torch.device('cpu')))
-
-    model.eval()
-
-    # get the input from the same data loader
-    full_dataset = ctDataset()
-    full_dataset_len = full_dataset.__len__()
-    train_size = int(0.8 * full_dataset_len)
-    test_size = full_dataset_len - train_size
-    train_dataset, test_dataset = torch.utils.data.random_split(full_dataset, [train_size, test_size], \
-                                                                generator=torch.Generator().manual_seed(42))
-    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=False, num_workers=0)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=0)
-
-    my_predictor = Predictor(use_gpu)
-
-    for i, sample in enumerate(test_loader):
-
-        if use_gpu:
-            for k in sample:
-                sample[k] = sample[k].to(device=device, non_blocking=True)
-        
-        # predict the output
-        # use the dataloader result instead of do the preprocess again
-        output, dets = my_predictor.process(sample['input'])
-
-        # transfer to numpy, and reshape [batch_size, K, 5] -> [K, 5]
-        # only considered batch size 1 here
-        dets_np = dets.detach().cpu().numpy()[0]
-
-        # select detections above threshold
-        threshold_mask = (dets_np[:, -1] > my_predictor.thresh_)
-        dets_np = dets_np[threshold_mask, :]
-
-        # need to convert from heatmap coordinate to image coordinate
-
-        # write results to list of txt files
-        dets_original = my_predictor.input2image(dets_np)
-        # print("Result: ", dets_original)
-
-        # draw the result
-        original_image = sample['image'][0].cpu().numpy()
-        for i in range(dets_original.shape[0]):
-            cv2.rectangle(original_image, \
-                        (dets_original[i,0],dets_original[i,1]), \
-                        (dets_original[i,2],dets_original[i,3]), \
-                        (0,255,0), 1)
-        # plt.imshow(cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB))
-        # plt.show()
-
-        # write the result
-        file_path = '../results/'
-        index_str = str(sample['index'].cpu().numpy()[0])
-        index_str = '0' * (6 - len(index_str)) + index_str
-
-        # cv2.imwrite("../predicts_valid/" + index_str + ".jpg", original_image) 
-
-        f = open(file_path + index_str + '.txt', "w")
-        f.close()
-        for line in range(dets_original.shape[0]):
-            f = open(file_path + index_str + '.txt', "a")
-            f.write("Car -1 -1 -10 " + str(dets_original[line,0]) + " " +\
-                                        str(dets_original[line,1]) + " " +\
-                                        str(dets_original[line,2]) + " " +\
-                                        str(dets_original[line,3]) + " " +\
-                                        "-1 -1 -1 -1000 -1000 -1000 -10 " + str(dets_original[line,4]) + '\n')
-            f.close()
-
+def DlaNet(num_layers=34, heads = {'hm': 1, 'wh': 2, 'reg': 2}, head_conv=256, plot=False):
+    model = Creat_DlaNet('dla{}'.format(num_layers), heads,
+                pretrained=True,
+                down_ratio=4,
+                head_conv=head_conv,
+                plot = plot)
+    return model
