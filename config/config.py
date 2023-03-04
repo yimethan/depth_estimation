@@ -14,8 +14,8 @@ class Config(object):
     centernet_path = '../centernet-models/best.pth'
     dataset_path = '../dataset/raw_data'
 
-    height = 128
-    width = 128
+    height = 256
+    width = 256
 
     log_f = 125
     save_f = 1

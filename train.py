@@ -7,6 +7,7 @@ from tensorboardX import SummaryWriter
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import kornia
+from tqdm import tqdm
 
 from dataset.load_dataset import Dataset
 from config.config import Config
@@ -38,8 +39,6 @@ class Train:
         self.num_total_steps = num_train_samples // Config.batch_size * Config.epochs
         
         self.val_iter = iter(self.val_loader)
-
-        print("Done loading dataset")
 
         self.writers = {}
         for mode in ["train", "val"]:
@@ -260,7 +259,7 @@ class Train:
         # Point-wise depth
         l1_loss = torch.mean(torch.abs(target - pred))
 
-        loss = ((0.70 * ssim_loss) + (0.20 * l1_loss) + (0.10 * depth_smoothness_loss))
+        loss = ((0.75 * ssim_loss) + (0.20 * l1_loss) + (0.15 * depth_smoothness_loss))
 
         return loss
     

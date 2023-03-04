@@ -6,6 +6,7 @@ import torch.utils.data as data
 import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
+import time
 
 from dataset.transform import Transform
 from model.detect import DlaNet
@@ -61,6 +62,8 @@ class Model(nn.Module):
             r_dets.detach()
 
             torch.cuda.synchronize()
+
+            print('dets', l_dets[:][-1], r_dets[:][-1])
 
         # TODO: create new img pair with detect results
         l_newinp = self.generate_newinp(x['l_img'], l_dets[:][-1])
@@ -157,16 +160,20 @@ class Model(nn.Module):
         gt = torch.squeeze(gt, 0)
 
         newimg = Image.new('L', (Config.width, Config.height))
+        gt_pil = transforms.functional.to_pil_image(gt)
+        gt_pil.save('./gen_newgt/orig/{}.png'.format(time.time()))
 
         for box in boxes:
 
             bbox = (int(torch.round(x)) for x in box)
             bbox = list(bbox)
 
-            to_paste = transforms.functional.to_pil_image(gt)
-            to_paste = to_paste.crop((bbox[0], bbox[3], bbox[2], bbox[1])) # left, top, right, bottom
+            to_paste = gt_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3])) # left, top, right, bottom
 
-            newimg.paste(to_paste, box=(bbox[3], bbox[0]))
+            newimg.paste(to_paste, box=(bbox[0], bbox[1]))
+            newimg.save('./gen_newgt/pasted/{}.png'.format(time.time()))
+
+        newimg.save('./gen_newgt/final/{}.png'.format(time.time()))
 
         newgt = transforms.ToTensor()(newimg)
         newgt = newgt.view(1, 1, Config.height, Config.width)
@@ -180,16 +187,20 @@ class Model(nn.Module):
         boxes = boxes * 0.25 # rescale
 
         newimg = Image.new('L', (Config.width//2, Config.height//2))
+        pred_pil = transforms.functional.to_pil_image(pred)
+        pred_pil.save('./gen_newpred/orig/{}.png'.format(time.time()))
 
         for box in boxes:
 
             bbox = (int(torch.round(x)) for x in box)
             bbox = list(bbox)
 
-            to_paste = transforms.functional.to_pil_image(pred)
-            to_paste = to_paste.crop((bbox[0], bbox[3], bbox[2], bbox[1]))  # left, top, right, bottom
+            to_paste = pred_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3]))  # left, top, right, bottom
 
-            newimg.paste(to_paste, box=(bbox[3], bbox[0]))
+            newimg.paste(to_paste, box=(bbox[0], bbox[1]))
+            newimg.save('./gen_newpred/pasted/{}.png'.format(time.time()))
+
+        newimg.save('./gen_newpred/final/{}.png'.format(time.time()))
 
         newpred = transforms.ToTensor()(newimg)
         newpred = newpred.view(1, Config.height//2, Config.width//2) # [1, 64, 64]
@@ -204,16 +215,25 @@ class Model(nn.Module):
         img = torch.squeeze(img)
 
         newimg = Image.new('RGB', (Config.width, Config.height))
-        to_paste = transforms.functional.to_pil_image(img)
+        img_pil = transforms.functional.to_pil_image(img)
+        img_pil.save('./gen_newinp/orig/{}.png'.format(time.time()))
 
         for box in boxes:
+
+            print('box', box)
 
             bbox = (int(torch.round(x)) for x in box)
             bbox = list(bbox)
 
-            one_car = to_paste.crop((bbox[0], bbox[3], bbox[2], bbox[1]))  # left, top, right, bottom
+            print('bbox', bbox)
 
-            newimg.paste(one_car, box=(bbox[3], bbox[0]))
+            one_car = img_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3]))  # left, top, width, height
+            newimg.save('./gen_newinp/one_car/{}.png'.format(time.time()))
+
+            newimg.paste(one_car, box=(bbox[0], bbox[1]))
+            newimg.save('./gen_newinp/pasted/{}.png'.format(time.time()))
+
+        newimg.save('./gen_newinp/final/{}.png'.format(time.time()))
 
         newinp = transforms.ToTensor()(newimg) # [3, 128, 128]
         newinp = newinp.view(1, 3, Config.height, Config.width)
