@@ -1,6 +1,0 @@
-.idea
-outputs/log/*
-outputs/ckp/*
-gen_newgt
-gen_newinp
-gen_newpred
