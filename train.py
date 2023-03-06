@@ -1,11 +1,14 @@
+import cv2
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
 import os
 import time
 from tensorboardX import SummaryWriter
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
+import kornia
+from tqdm import tqdm
 
 from dataset.load_dataset import Dataset
 from config.config import Config
@@ -26,26 +29,29 @@ class Train:
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, Config.scheduler_f, 0.1)
 
         print("Loading dataset...")
-        train_dataset = Dataset(is_train=True)
-        self.train_loader = DataLoader(train_dataset, Config.batch_size, True,
+        dataset = Dataset()
+        dataset_size = len(dataset)
+        train_size = int(dataset_size * .8)
+        test_size = dataset_size - train_size
+
+        train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+
+        print('train size', len(train_dataset), ' test size', len(test_dataset))
+
+        self.train_loader = DataLoader(train_dataset, Config.batch_size, shuffle=True,
             num_workers=Config.num_workers, pin_memory=True, drop_last=True)
-        val_dataset = Dataset(is_train=False)
-        self.val_loader = DataLoader(val_dataset, Config.batch_size, True,
+        test_dataset = Dataset()
+        self.test_loader = DataLoader(test_dataset, Config.batch_size, shuffle=False,
             num_workers=Config.num_workers, pin_memory=True, drop_last=True)
 
         num_train_samples = len(train_dataset)
         self.num_total_steps = num_train_samples // Config.batch_size * Config.epochs
         
-        self.val_iter = iter(self.val_loader)
-
-        print("Done loading dataset")
+        self.test_iter = iter(self.test_loader)
 
         self.writers = {}
-        for mode in ["train", "val"]:
+        for mode in ["train", "test"]:
             self.writers[mode] = SummaryWriter(os.path.join(Config.log_dir, mode))
-
-        # self.depth_metric_names = [
-        #     "de/abs_rel", "de/sq_rel", "de/rms", "de/log_rms", "da/a1", "da/a2", "da/a3"]
         
     def train(self):
 
@@ -92,7 +98,7 @@ class Train:
             #     'l_bbox':left_y, 'r_bbox':right_y}
             outputs = self.model(inputs)
 
-            loss = self.compute_loss(inputs['l_depth'], inputs['r_depth'], outputs['l_pred'], outputs['r_pred'])
+            loss = self.compute_loss(inputs['l_depth'], outputs['l_pred']) + self.compute_loss(inputs['r_depth'], outputs['r_pred'])
             loss.requires_grad_(True)
 
             self.model_optimizer.zero_grad()
@@ -101,33 +107,28 @@ class Train:
 
             duration = time.time() - start_time
 
-            # log less frequently after the first 2000 steps to save time & disk space
-            early_phase = batch_idx % Config.log_f == 0 and self.step < 2000
-            late_phase = self.step % 2000 == 0
-
-            if early_phase or late_phase:
+            if batch_idx % Config.log_f == 0:
                 self.log_time(batch_idx, duration, loss.cpu().data)
 
                 errors = self.compute_errors(inputs, outputs)
                 car_errors = self.compute_car_errors(inputs, outputs)
 
                 self.log("train", inputs, outputs, loss, car_errors, errors)
-                self.val()
+                self.test()
 
             self.step += 1
 
         self.model_lr_scheduler.step()
 
-    def val(self):
-        """Validate the model on a single minibatch
-        """
+    def test(self):
+
         self.model.eval()
 
         try:
-            inputs = self.val_iter.next()
+            inputs = self.test_iter.next()
         except StopIteration:
-            self.val_iter = iter(self.val_loader)
-            inputs = self.val_iter.next()
+            self.test_iter = iter(self.test_loader)
+            inputs = self.test_iter.next()
 
         with torch.no_grad():
             # output = {'l_pred':left_prob, 'r_pred':right_prob,
@@ -135,16 +136,15 @@ class Train:
             #     'l_bbox':left_y, 'r_bbox':right_y}
             outputs = self.model(inputs)
 
-            loss = self.compute_loss(inputs['l_depth'], inputs['r_depth'], outputs['l_pred'], outputs['r_pred'])
+            loss = self.compute_loss(inputs['l_depth'], outputs['l_pred']) + self.compute_loss(inputs['r_depth'], outputs['r_pred'])
             loss.requires_grad_(True)
             
             self.model_optimizer.zero_grad()
             self.model_optimizer.step()
 
             errors = self.compute_errors(inputs, outputs)
-            car_errors = self.compute_car_errors(inputs, outputs)
 
-            self.log("val", inputs, outputs, loss, car_errors, errors)
+            self.log("test", inputs, outputs, loss, errors)
             del inputs, outputs, loss
 
         self.model.train()
@@ -173,154 +173,108 @@ class Train:
         t //= 60
         return "{:02d}h{:02d}m{:02d}s".format(t, m, s)
     
-    def log(self, mode, inputs, outputs, loss, car_loss, errors):
-        """Write an event to the tensorboard events file
-        """
-        writer = self.writers[mode]
-        # for l, v in loss.item():
-        #     # loss
-        #     writer.add_scalar("loss_{}".format(l), v, self.step)
-        #
-        # for l, v in car_loss.item():
-        #     # car_loss
-        #     writer.add_scalar('car_loss_{}'.format(l), v, self.step)
+    def log(self, mode, inputs, outputs, loss, errors):
 
-        writer.add_scalar("loss_{}".format(self.epoch), loss, self.step)
-        writer.add_scalar('car_loss_{}'.format(self.epoch), loss, self.step)
+        writer = self.writers[mode]
+
+        writer.add_scalar("loss", loss, self.step)
 
         # errors
-        for side in [2, 3]:
-            writer.add_scalar('errors_{}/abs_rel/{}'.format(side, errors['left' if side == 2 else 'right']['abs_rel']), self.step)
-            writer.add_scalar('errors_{}/sq_rel/{}'.format(side, errors['left' if side == 2 else 'right']['sq_rel']), self.step)
-            writer.add_scalar('errors_{}/rmse/{}'.format(side, errors['left' if side == 2 else 'right']['rmse']), self.step)
-            writer.add_scalar('errors_{}/rmse_log/{}'.format(side, errors['left' if side == 2 else 'right']['rmse_log']), self.step)
-            writer.add_scalar('errors_{}/a1/{}'.format(side, errors['left' if side == 2 else 'right']['a1']), self.step)
-            writer.add_scalar('errors_{}/a2/{}'.format(side, errors['left' if side == 2 else 'right']['a2']), self.step)
-            writer.add_scalar('errors_{}/a3/{}'.format(side, errors['left' if side == 2 else 'right']['a3']), self.step)
+        writer.add_scalar('rmse_2', errors[0], self.step)
+        writer.add_scalar('rmse_3', errors[1], self.step)
 
-        for j in range(min(4, Config.batch_size)):  # write a maximum of four images
+        l_img = torch.squeeze(inputs['l_img'])
+        r_img = torch.squeeze(inputs['r_img'])
+        writer.add_image("orig_img_2", l_img, self.step)
+        writer.add_image("orig_img_3", r_img, self.step)
 
-            # original images
-            l_img = torch.squeeze(inputs['l_img'][j])
-            r_img = torch.squeeze(inputs['r_img'][j])
-            writer.add_image("orig_img_2/{}".format(j), l_img, self.step)
-            writer.add_image("orig_img_3/{}".format(j), r_img, self.step)
-                
-            # new images with only vehicles
-            l_newinp = torch.squeeze(outputs['l_newinp'][j])
-            r_newinp = torch.squeeze(outputs['r_newinp'][j])
-            writer.add_image("car_img_2/{}".format(j), l_newinp, self.step)
-            writer.add_image("car_img_3/{}".format(j), r_newinp, self.step)
+        # new images with only vehicles
+        l_newinp = torch.squeeze(outputs['l_newinp'])
+        r_newinp = torch.squeeze(outputs['r_newinp'])
 
-            # depth map
-            l_pred = outputs['l_pred'].reshape(1, Config.height//2, Config.width//2)
-            r_pred = outputs['r_pred'].reshape(1, Config.height // 2, Config.width // 2)
-            writer.add_image("disp_2/{}".format(j),
-                self.normalize_image(l_pred), self.step)
-            writer.add_image("disp_3/{}".format(j),
-                self.normalize_image(r_pred), self.step)
+        # depth map
+        l_pred = outputs['l_pred'].reshape(1, Config.height, Config.width)
+        r_pred = outputs['r_pred'].reshape(1, Config.height, Config.width)
+        writer.add_image("disp_2", self.normalize_image(l_pred), self.step)
+        writer.add_image("disp_3", self.normalize_image(r_pred), self.step)
                     
     def normalize_image(self, x):
-        """Rescale image pixels to span range [0, 1]
-        """
+
         ma = float(x.max().cpu().data)
         mi = float(x.min().cpu().data)
         d = ma - mi if ma != mi else 1e5
         return (x - mi) / d
-    
-    def compute_car_errors(self, inputs, outputs):
-        
-        # l_pred -> l_newpred / r_pred -> r_newpred
-        # l_gt -> l_newgt / r_gt r_newgt
 
-        print('compute car errors:', 'pred', outputs['l_pred'].size(), 'l_depth', inputs['l_depth'].size())
-        # [1, 256, 256] [1, 1, 512, 512]
+    def compute_loss(self, target, pred):
 
-        outputs['l_pred'] = self.model.generate_newpred(outputs['l_pred'], outputs['l_bbox'][:][-1])
-        outputs['r_pred'] = self.model.generate_newpred(outputs['r_pred'], outputs['r_bbox'][:][-1])
-        inputs['l_depth'] = self.model.generate_newgt(inputs['l_depth'], outputs['l_bbox'][:][-1])
-        inputs['r_depth'] = self.model.generate_newgt(inputs['r_depth'], outputs['r_bbox'][:][-1])
+        target = transforms.functional.resize(target, (Config.height, Config.width))
+        target = target.view(1, 1, Config.height, Config.width)
 
-        print('compute car errors after newinp:', 'pred', outputs['l_pred'].size(), 'l_depth', inputs['l_depth'].size())
-        # [1, 256, 256] [1, 1, 512, 512]
+        pred = pred.view(1, 1, Config.height, Config.width)
 
-        # inputs['l_depth'] = transforms.Grayscale()(inputs['l_depth'])
-        # inputs['r_depth'] = transforms.Grayscale()(inputs['r_depth'])
-        #
-        # print('compute car errors after grayscale:', 'l_depth', inputs['l_depth'].size())
+        # Edges
+        target_edges = kornia.filters.spatial_gradient(target)
+        dx_true = target_edges[:, :, 0]
+        dy_true = target_edges[:, :, 1]
 
-        return self.compute_errors(inputs, outputs)
-    
-    def compute_loss(self, l_gt, r_gt, l_pred, r_pred):
+        pred_edges = kornia.filters.spatial_gradient(pred)
+        dx_pred = target_edges[:, :, 0]
+        dy_pred = target_edges[:, :, 1]
 
-        # print('compute loss gt', l_gt.size(), r_gt.size()) # [1, 1, 512, 512]
-        # print('compute loss pred', l_pred.size(), r_pred.size()) # [1, 256, 256]
+        weights_x = torch.exp(torch.mean(torch.abs(dx_true)))
+        weights_y = torch.exp(torch.mean(torch.abs(dy_true)))
 
-        # TODO: squeeze gt
-        l_gt = torch.squeeze(l_gt, 0)
-        r_gt = torch.squeeze(r_gt, 0)
+        # Depth smoothness
+        smoothness_x = dx_pred * weights_x
+        smoothness_y = dy_pred * weights_y
 
-        # TODO: resize gt to pred size
-        l_gt = transforms.functional.resize(l_gt, (Config.height//2, Config.width//2))
-        r_gt = transforms.functional.resize(r_gt, (Config.height//2, Config.width//2))
+        depth_smoothness_loss = torch.mean(torch.abs(smoothness_x)) + torch.mean(torch.abs(smoothness_y))
 
-        loss_left = torch.mean(torch.abs(l_pred - l_gt))
-        loss_right = torch.mean(torch.abs(r_pred - r_gt))
+        # Structural similarity (SSIM) index
+        ssim_loss = 1 - kornia.losses.ssim_loss(pred, target, window_size=7, reduction='mean')
 
-        return loss_left + loss_right
+        # Point-wise depth
+        l1_loss = torch.mean(torch.abs(target - pred))
+
+        loss = ((0.75 * ssim_loss) + (0.20 * l1_loss) + (0.15 * depth_smoothness_loss))
+
+        return loss
     
     def compute_errors(self, inputs, outputs):
 
-        errors = {'left': {}, 'right': {}}
-
-        l_pred = outputs['l_pred'] # [1, 256, 256]
+        l_pred = outputs['l_pred'] # [1, 512, 512]
         r_pred = outputs['r_pred']
         l_gt = inputs["l_depth"] # [1, 1, 512, 512]
         r_gt = inputs["r_depth"]
 
         # TODO: gt size to pred size
-        l_gt = transforms.functional.resize(l_gt, (Config.height//2, Config.width//2))
-        r_gt = transforms.functional.resize(r_gt, (Config.height//2, Config.width//2))
+        l_gt = transforms.functional.resize(l_gt, (Config.height, Config.width))
+        r_gt = transforms.functional.resize(r_gt, (Config.height, Config.width))
         l_gt = torch.squeeze(l_gt, 0)
         r_gt = torch.squeeze(r_gt, 0)
 
-        l_pred = torch.clamp(l_pred, min=1e-3, max=Config.maxdisp) # [1, 256, 256]
+        l_pred = torch.clamp(l_pred, min=1e-3, max=Config.maxdisp)
         r_pred = torch.clamp(r_pred, min=1e-3, max=Config.maxdisp)
 
         l_pred = l_pred.detach()
         r_pred = r_pred.detach()
 
-        errors['left'] = self.compute_depth_errors(l_gt, l_pred)
-        errors['right'] = self.compute_depth_errors(r_gt, r_pred)
+        left_rmse = self.compute_depth_errors(l_gt, l_pred)
+        right_rmse = self.compute_depth_errors(r_gt, r_pred)
 
-        return errors
+        return left_rmse, right_rmse
 
     def compute_depth_errors(self, gt, pred):
-        """Computation of error metrics between predicted and ground truth depths
-        """
-        print('compute depth errors:', 'gt', gt.size(), 'pred', pred.size()) # [1, 256, 256] [1, 256, 256]
-
-        thresh = torch.max((gt / pred), (pred / gt))
-        a1 = (thresh < 1.25     ).float().mean()
-        a2 = (thresh < 1.25 ** 2).float().mean()
-        a3 = (thresh < 1.25 ** 3).float().mean()
 
         rmse = (gt - pred) ** 2
         rmse = torch.sqrt(rmse.mean())
 
-        rmse_log = (torch.log(gt) - torch.log(pred)) ** 2
-        rmse_log = torch.sqrt(rmse_log.mean())
-
-        abs_rel = torch.mean(torch.abs(gt - pred) / gt)
-
-        sq_rel = torch.mean((gt - pred) ** 2 / gt)
-
-        errors = {'abs_rel': abs_rel, 'sq_rel': sq_rel, 'rmse': rmse, 'rmse_log': rmse_log, 'a1': a1, 'a2': a2, 'a3': a3}
-
-        return errors
+        return rmse
 
 
 if __name__ == '__main__':
+
+    os.environ['KMP_DUPLICATE_LIB_OK'] = 'False'
 
     train = Train()
     train.train()
