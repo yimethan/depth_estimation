@@ -1,0 +1,7 @@
+.idea
+outputs/
+gen_newgt
+gen_newinp
+gen_newpred
+dense-depth
+*/__pycache__
