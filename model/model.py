@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
 import time
+import gc
 
 from dataset.transform import Transform
 from model.detect import DlaNet
@@ -21,27 +22,34 @@ class Model(nn.Module):
 
         super(Model, self).__init__()
 
-        self.detect_model = DlaNet()
-        self.detect_model.load_state_dict(torch.load(Config.centernet_path))
-
-        # freeze detection model's layers
-        for param in self.detect_model.parameters():
-            param.requires_grad = False
+        self.device = torch.device('cuda')
 
         self.transform = Transform()
 
         self.depth_model = DepthBlock(BasicBlock, ThreedConv, [8, 1])
+        self.depth_model = self.depth_model.to(self.device)
 
     def forward(self, x):
         
         # TODO: detect vehicles in each image
         # (h, w, 3) -> (3, h, w) -> (1, 3, h, w)
-        l_inp = x['l_img'].reshape(1, 3, Config.height, Config.width)
-        r_inp = x['r_img'].reshape(1, 3, Config.height, Config.width) # [1, 3, 512, 512]
+        l_inp = x['l_img'].reshape(1, 3, Config.detect_height, Config.detect_width)
+        r_inp = x['r_img'].reshape(1, 3, Config.detect_height, Config.detect_width) # [1, 3, 512, 512]
 
         with torch.no_grad():
+            self.detect_model = DlaNet()
+            self.detect_model.load_state_dict(torch.load(Config.centernet_path))
+
+            self.detect_model = self.detect_model.to(self.device)
+
+            # freeze detection model's layers
+            for param in self.detect_model.parameters():
+                param.requires_grad = False
+
             left_y = self.detect_model(l_inp)
             right_y = self.detect_model(r_inp)
+
+            del self.detect_model
 
             hm = left_y['hm'].sigmoid_()
             wh = left_y['wh']
@@ -58,14 +66,25 @@ class Model(nn.Module):
             r_dets = self.ctdet_decode(heads, 40)
             # detections : ([batch_size, K, [xmin, ymin, xmax, ymax, score]])
 
+            del left_y, right_y
+
             l_dets.detach()
             r_dets.detach()
 
             torch.cuda.synchronize()
 
-        # TODO: create new img pair with detect results
-        l_newinp = self.generate_newinp(x['l_img'], l_dets[:][-1])
-        r_newinp = self.generate_newinp(x['r_img'], r_dets[:][-1]) # [1, 3, 128, 128]
+            # TODO: create new img pair with detect results
+            l_newinp = self.generate_newinp(x['l_img'], l_dets[:][-1])
+            r_newinp = self.generate_newinp(x['r_img'], r_dets[:][-1])
+
+        l_newinp = l_newinp.to(self.device)
+        r_newinp = r_newinp.to(self.device)
+
+        l_newinp = transforms.functional.resize(l_newinp, (Config.height, Config.width))
+        r_newinp = transforms.functional.resize(r_newinp, (Config.height, Config.width))
+
+        l_inp = transforms.functional.resize(l_inp, (Config.height, Config.width))
+        r_inp = transforms.functional.resize(r_inp, (Config.height, Config.width))
 
         # # TODO: feed each imgs through depth blocks
         l_prob, r_prob = self.depth_model(l_inp, r_inp, l_newinp, r_newinp)
@@ -114,14 +133,14 @@ class Model(nn.Module):
         wh = wh.view(batch, K, 2)
 
         self.post_process(xs, ys, wh, reg)
-        
+
         scores = scores.view(batch, K, 1)
-        bboxes = torch.cat([xs - wh[..., 0:1] / 2, 
+        bboxes = torch.cat([xs - wh[..., 0:1] / 2,
                             ys - wh[..., 1:2] / 2,
-                            xs + wh[..., 0:1] / 2, 
+                            xs + wh[..., 0:1] / 2,
                             ys + wh[..., 1:2] / 2], dim=2)
         detections = torch.cat([bboxes, scores], dim=2)
-        
+
         return detections
     
     def gather_feat(self, feat, ind):
@@ -129,7 +148,7 @@ class Model(nn.Module):
         dim = feat.size(2)
         ind = ind.unsqueeze(2).expand(ind.size(0), ind.size(1), dim)
         feat = feat.gather(1, ind)
-            
+
         return feat
     
     def transpose_and_gather_feat(self, feat, ind):
@@ -149,21 +168,35 @@ class Model(nn.Module):
             wh[0, i, 0] = wh[0, i, 0] * 4
             wh[0, i, 1] = wh[0, i, 1] * 4
 
+    def rescale_bbox(self, orig_shape, new_shape, bbox):
+
+        x_scale = new_shape[1] / orig_shape[1]
+        y_scale = new_shape[0] / orig_shape[0]
+
+        xmin = int(torch.round(bbox[0] * x_scale))
+        ymin = int(torch.round(bbox[1] * y_scale))
+        xmax = int(torch.round(bbox[2] * x_scale))
+        ymax = int(torch.round(bbox[3] * y_scale))
+
+        return [xmin, ymin, xmax, ymax]
+
     def generate_newgt(self, gt, boxes):
 
-        # gt [1, 1, 256, 256]
+        # gt [1, 375, 1242]
 
         # [xmin, ymin, xmax, ymax, score]
 
-        gt = torch.squeeze(gt, 0)
+        # gt = torch.squeeze(gt, 0)
 
-        newimg = Image.new('L', (Config.width, Config.height))
+        newimg = Image.new('L', Config.full_res_shape)
         gt_pil = transforms.functional.to_pil_image(gt)
         gt_pil.save('./gen_newgt/orig/{}.png'.format(time.time()))
 
         for box in boxes:
 
-            bbox = (int(torch.round(x)) for x in box)
+            # bbox = (int(torch.round(x)) for x in box)
+            bbox = self.rescale_bbox((Config.detect_height, Config.detect_width),
+                                     (Config.full_res_shape[1], Config.full_res_shape[0]), box)
             bbox = list(bbox)
 
             to_paste = gt_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3])) # left, top, right, bottom
@@ -173,13 +206,13 @@ class Model(nn.Module):
         newimg.save('./gen_newgt/final/{}.png'.format(time.time()))
 
         newgt = transforms.ToTensor()(newimg)
-        newgt = newgt.view(1, 1, Config.height, Config.width)
+        newgt = newgt.view(1, 1, Config.full_res_shape[1], Config.full_res_shape[0])
 
         return newgt
 
     def generate_newpred(self, pred, boxes):
 
-        # pred [1, 128, 128]
+        # pred [1, 128, 256]
 
         newimg = Image.new('L', (Config.width, Config.height))
         pred_pil = transforms.functional.to_pil_image(pred)
@@ -187,7 +220,8 @@ class Model(nn.Module):
 
         for box in boxes:
 
-            bbox = (int(torch.round(x)) for x in box)
+            # bbox = (int(torch.round(x)) for x in box)
+            bbox = self.rescale_bbox((Config.detect_height, Config.detect_width), (Config.height, Config.width), box)
             bbox = list(bbox)
 
             to_paste = pred_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3]))  # left, top, right, bottom
@@ -202,13 +236,14 @@ class Model(nn.Module):
         return newpred
 
     def generate_newinp(self, img, boxes):
+
+        # [1, 3, 256, 512]
         
         # [xmin, ymin, xmax, ymax, score]
 
-        # img [1, 3, 128, 128]
         img = torch.squeeze(img)
 
-        newimg = Image.new('RGB', (Config.width, Config.height))
+        newimg = Image.new('RGB', (Config.detect_width, Config.detect_height))
         img_pil = transforms.functional.to_pil_image(img)
 
         for box in boxes:
@@ -216,14 +251,14 @@ class Model(nn.Module):
             bbox = (int(torch.round(x)) for x in box)
             bbox = list(bbox)
 
-            one_car = img_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3]))  # left, top, width, height
+            one_car = img_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3]))  # left, top, right, bottom
 
             newimg.paste(one_car, box=(bbox[0], bbox[1]))
 
         newimg.save('./gen_newinp/final/{}.png'.format(time.time()))
 
-        newinp = transforms.ToTensor()(newimg) # [3, 128, 128]
-        newinp = newinp.view(1, 3, Config.height, Config.width)
+        newinp = transforms.ToTensor()(newimg)
+        newinp = newinp.view(1, 3, Config.detect_height, Config.detect_width)
 
         return newinp
 
@@ -320,7 +355,7 @@ class DepthBlock(nn.Module):
         # last deconv3d
         self.deconv5 = nn.ConvTranspose3d(32, 1, 3, 2, 1, 1)
 
-        self.maxpool = nn.MaxPool3d((2, 1, 1))
+        self.avgpool = nn.AvgPool3d((2, 1, 1))
 
     def _make_layer(self, block, in_planes, planes, num_block, stride):
         strides = [stride] + [1] * (num_block - 1)
@@ -347,6 +382,11 @@ class DepthBlock(nn.Module):
         # TODO: create cost volume
         left_cost, right_cost = self.cost_volume(imgl0, imgr0, carl0, carr0) # [1, 64, 128, 64, 64]
 
+        del imgl0, imgr0, carl0, carr0
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
         # TODO: 3d conv and deconv
         left_out = self.after_cost(left_cost)
         right_out = self.after_cost(right_cost) # [1, 128, 128, 128]
@@ -358,7 +398,7 @@ class DepthBlock(nn.Module):
         left_softmax = F.softmax(-left_squeeze, dim=0)
         right_softmax = F.softmax(-right_squeeze, dim=0) # [128, 128, 128]
 
-        d_grid = torch.arange(Config.maxdisp, dtype=torch.float32).reshape(-1, 1, 1)
+        d_grid = torch.arange(Config.maxdisp, dtype=torch.float32).reshape(-1, 1, 1).cuda()
         d_grid = d_grid.repeat(1, Config.height, Config.width)
 
         # TODO: soft argmin
@@ -370,7 +410,7 @@ class DepthBlock(nn.Module):
     def after_cost(self, cost_volume):
 
         conv3d_out = F.relu(self.bn3d_1(self.conv3d_1(cost_volume)))
-        conv3d_out = F.relu(self.bn3d_2(self.conv3d_2(conv3d_out))) # [1, 32, 128, 64, 64]
+        conv3d_out = F.relu(self.bn3d_2(self.conv3d_2(conv3d_out)))
 
         # conv3d block
         conv3d_block_1 = self.block_3d_1(cost_volume)
@@ -388,14 +428,17 @@ class DepthBlock(nn.Module):
         deconv3d = F.relu(self.debn4(self.deconv4(deconv3d)) + conv3d_out)
 
         # last deconv3d
-        deconv3d = self.deconv5(deconv3d) # [1, 1, 256, 128, 128]
-        maxpooling = self.maxpool(deconv3d) # [1, 1, 128, 128, 128]
+        deconv3d = self.deconv5(deconv3d)  # [1, 1, 256, 128, 128]
+        avgpool = self.avgpool(deconv3d) # [1, 1, 128, 128, 128]
 
-        out = maxpooling.view(1, Config.maxdisp, Config.height, Config.width) # [1, 128, 128, 128]
+        out = avgpool.view(1, Config.maxdisp, Config.height, Config.width) # [1, 128, 128, 128]
 
         return out
 
     def cost_volume(self, imgl, imgr, carl, carr, feature_size=32):
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # img: 1, f, h//2, w//2 [1, 32, 64, 64]
 
@@ -410,7 +453,7 @@ class DepthBlock(nn.Module):
 
             else:
 
-                zero = torch.zeros(Config.batch_size, feature_size, Config.height // 2, d) # [1, 32, 64, d]
+                zero = torch.zeros(Config.batch_size, feature_size, Config.height // 2, d).cuda() # [1, 32, 64, d]
 
                 rightmove = torch.cat([zero, imgr], axis=3) # [1, 32, 64, maxdisp-d]
                 leftmove = torch.cat([imgl, zero], axis=3) # width

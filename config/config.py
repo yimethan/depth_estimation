@@ -1,7 +1,7 @@
 class Config(object):
 
     batch_size = 1
-    epochs = 1
+    epochs = 5
     lr = 1e-2
 
     gpu = True
@@ -11,11 +11,14 @@ class Config(object):
     log_dir = './outputs/log'
     checkpoint_dir = './outputs/ckp'
 
-    centernet_path = '../centernet-models/best.pth'
+    centernet_path = '../centernet-re/best.pth'
     dataset_path = '../dataset/raw_data'
 
-    height = 256
-    width = 512
+    height = 128
+    width = 256
+
+    detect_height = 256
+    detect_width = 512
 
     full_res_shape = (1242, 375)
 

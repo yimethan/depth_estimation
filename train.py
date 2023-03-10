@@ -8,7 +8,7 @@ from tensorboardX import SummaryWriter
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 import kornia
-from tqdm import tqdm
+import gc
 
 from dataset.load_dataset import Dataset
 from config.config import Config
@@ -64,6 +64,9 @@ class Train:
 
         self.model.train()
 
+        cuda = torch.device('cuda')
+        self.model = self.model.cuda()
+
         self.step = 0
         self.epoch = 0
 
@@ -99,6 +102,10 @@ class Train:
             # output = {'l_pred':left_prob, 'r_pred':right_prob,
             #     'l_newinp':l_newinp, 'r_newinp':r_newinp,
             #     'l_bbox':left_y, 'r_bbox':right_y}
+
+            for key, ipt in inputs.items():
+                inputs[key] = ipt.to(self.device)
+
             outputs = self.model(inputs)
 
             loss = self.compute_loss(inputs['l_depth'], outputs['l_pred']) + self.compute_loss(inputs['r_depth'], outputs['r_pred'])
@@ -121,6 +128,9 @@ class Train:
 
             self.step += 1
 
+            gc.collect()
+            torch.cuda.empty_cache()
+
         self.model_lr_scheduler.step()
 
     def test(self):
@@ -137,6 +147,9 @@ class Train:
             # output = {'l_pred':left_prob, 'r_pred':right_prob,
             #     'l_newinp':l_newinp, 'r_newinp':r_newinp,
             #     'l_bbox':left_y, 'r_bbox':right_y}
+            for key, ipt in inputs.items():
+                inputs[key] = ipt.to(self.device)
+
             outputs = self.model(inputs)
 
             loss = self.compute_loss(inputs['l_depth'], outputs['l_pred']) + self.compute_loss(inputs['r_depth'], outputs['r_pred'])
@@ -150,6 +163,8 @@ class Train:
 
             self.log("test", inputs, outputs, loss, car_errors, errors)
             del inputs, outputs, loss
+            gc.collect()
+            torch.cuda.empty_cache()
 
         self.model.train()
     
@@ -222,10 +237,11 @@ class Train:
 
         # pred [1, 128, 128] depth [1, 1, 128, 128]
 
-        outputs['l_pred'] = self.model.generate_newpred(outputs['l_pred'], outputs['l_bbox'][:][-1])
-        outputs['r_pred'] = self.model.generate_newpred(outputs['r_pred'], outputs['r_bbox'][:][-1])
-        inputs['l_depth'] = self.model.generate_newgt(inputs['l_depth'], outputs['l_bbox'][:][-1])
-        inputs['r_depth'] = self.model.generate_newgt(inputs['r_depth'], outputs['r_bbox'][:][-1])
+        with torch.no_grad():
+            outputs['l_pred'] = self.model.generate_newpred(outputs['l_pred'], outputs['l_bbox'][:][-1])
+            outputs['r_pred'] = self.model.generate_newpred(outputs['r_pred'], outputs['r_bbox'][:][-1])
+            inputs['l_depth'] = self.model.generate_newgt(inputs['l_depth'], outputs['l_bbox'][:][-1])
+            inputs['r_depth'] = self.model.generate_newgt(inputs['r_depth'], outputs['r_bbox'][:][-1])
 
         # newpred [1, 128, 128], newgt [1, 1, 128, 128]
 
@@ -233,36 +249,40 @@ class Train:
 
     def compute_loss(self, target, pred):
 
-        target = transforms.functional.resize(target, (Config.height, Config.width))
-        target = target.view(1, 1, Config.height, Config.width)
+        with torch.no_grad():
 
-        pred = pred.view(1, 1, Config.height, Config.width)
+            target = transforms.functional.resize(target, (Config.height, Config.width))
+            target = target.view(1, 1, Config.height, Config.width)
 
-        # Edges
-        target_edges = kornia.filters.spatial_gradient(target)
-        dx_true = target_edges[:, :, 0]
-        dy_true = target_edges[:, :, 1]
+            pred = pred.view(1, 1, Config.height, Config.width)
 
-        pred_edges = kornia.filters.spatial_gradient(pred)
-        dx_pred = target_edges[:, :, 0]
-        dy_pred = target_edges[:, :, 1]
+            pred.detach()
 
-        weights_x = torch.exp(torch.mean(torch.abs(dx_true)))
-        weights_y = torch.exp(torch.mean(torch.abs(dy_true)))
+            # Edges
+            target_edges = kornia.filters.spatial_gradient(target)
+            dx_true = target_edges[:, :, 0]
+            dy_true = target_edges[:, :, 1]
 
-        # Depth smoothness
-        smoothness_x = dx_pred * weights_x
-        smoothness_y = dy_pred * weights_y
+            pred_edges = kornia.filters.spatial_gradient(pred)
+            dx_pred = target_edges[:, :, 0]
+            dy_pred = target_edges[:, :, 1]
 
-        depth_smoothness_loss = torch.mean(torch.abs(smoothness_x)) + torch.mean(torch.abs(smoothness_y))
+            weights_x = torch.exp(torch.mean(torch.abs(dx_true)))
+            weights_y = torch.exp(torch.mean(torch.abs(dy_true)))
 
-        # Structural similarity (SSIM) index
-        ssim_loss = 1 - kornia.losses.ssim_loss(pred, target, window_size=7, reduction='mean')
+            # Depth smoothness
+            smoothness_x = dx_pred * weights_x
+            smoothness_y = dy_pred * weights_y
 
-        # Point-wise depth
-        l1_loss = torch.mean(torch.abs(target - pred))
+            depth_smoothness_loss = torch.mean(torch.abs(smoothness_x)) + torch.mean(torch.abs(smoothness_y))
 
-        loss = ((0.75 * ssim_loss) + (0.20 * l1_loss) + (0.15 * depth_smoothness_loss))
+            # Structural similarity (SSIM) index
+            ssim_loss = 1 - kornia.losses.ssim_loss(pred, target, window_size=7, reduction='mean')
+
+            # Point-wise depth
+            l1_loss = torch.mean(torch.abs(target - pred))
+
+            loss = ((0.75 * ssim_loss) + (0.20 * l1_loss) + (0.15 * depth_smoothness_loss))
 
         return loss
     
@@ -278,6 +298,9 @@ class Train:
         r_gt = transforms.functional.resize(r_gt, (Config.height, Config.width))
         l_gt = torch.squeeze(l_gt, 0)
         r_gt = torch.squeeze(r_gt, 0)
+
+        l_pred = 1 / l_pred
+        r_pred = 1 / r_pred
 
         l_pred = torch.clamp(l_pred, min=1e-3, max=Config.maxdisp)
         r_pred = torch.clamp(r_pred, min=1e-3, max=Config.maxdisp)
@@ -300,7 +323,15 @@ class Train:
 
 if __name__ == '__main__':
 
-    os.environ['KMP_DUPLICATE_LIB_OK'] = 'False'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    print(torch.cuda.is_available())
+    print(torch.cuda.current_device())
+    print(torch.cuda.get_device_name(0))
 
     train = Train()
     train.train()
