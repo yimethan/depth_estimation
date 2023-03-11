@@ -46,14 +46,22 @@ class Dataset(data.Dataset):
 
         date = split_path[1]
         sync = split_path[2]
+        n = split_path1[-1].split('.')[0].split('\\')[1]
         num = split_path1[-1].split('.')[0] + '.bin'
 
-        l_img = Image.open(self.images['l'][idx]).convert('RGB')
-        r_img = Image.open(self.images['r'][idx]).convert('RGB')
+        # print(n)
 
         # TODO: load velo points
         calib_path = os.path.join(self.dataset_path, date)
         velo_filename = os.path.join(calib_path, sync, 'velodyne_points', num)
+
+        if not os.path.exists(velo_filename):
+
+            idx = 0
+            velo_filename = os.path.join(calib_path, sync, 'velodyne_points', 'data', '0000000000.bin')
+
+        l_img = Image.open(self.images['l'][idx]).convert('RGB')
+        r_img = Image.open(self.images['r'][idx]).convert('RGB')
 
         l_gt = self.generate_depth_map(calib_path, velo_filename, 2)
         r_gt = self.generate_depth_map(calib_path, velo_filename, 3)
@@ -62,14 +70,14 @@ class Dataset(data.Dataset):
 
         (Image.fromarray(l_gt).convert('L')).save('./dense-depth/{}.png'.format(time.time()))
 
-        l_img = self.transform(l_img)
-        r_img = self.transform(r_img)
-
         l_gt = self.normalize_gt(l_gt)
         r_gt = self.normalize_gt(r_gt)
 
         l_gt = torch.from_numpy(l_gt)
         r_gt = torch.from_numpy(r_gt)
+
+        l_img = self.transform(l_img)
+        r_img = self.transform(r_img)
 
         item = {'l_img': l_img, 'r_img': r_img, 'l_depth': l_gt, 'r_depth': r_gt}
 

@@ -190,7 +190,6 @@ class Model(nn.Module):
 
         newimg = Image.new('L', Config.full_res_shape)
         gt_pil = transforms.functional.to_pil_image(gt)
-        gt_pil.save('./gen_newgt/orig/{}.png'.format(time.time()))
 
         for box in boxes:
 
@@ -203,7 +202,7 @@ class Model(nn.Module):
 
             newimg.paste(to_paste, box=(bbox[0], bbox[1]))
 
-        newimg.save('./gen_newgt/final/{}.png'.format(time.time()))
+        newimg.save('./gen_newgt/{}.png'.format(time.time()))
 
         newgt = transforms.ToTensor()(newimg)
         newgt = newgt.view(1, 1, Config.full_res_shape[1], Config.full_res_shape[0])
