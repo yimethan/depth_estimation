@@ -9,7 +9,8 @@ class Config(object):
 
     model_name = 'my_model.pth'
     log_dir = './outputs/log'
-    checkpoint_dir = './outputs/ckp'
+
+    last_epoch_path = './outputs/models/weights_epoch0_4000'
 
     centernet_path = '../centernet-re/best.pth'
     dataset_path = '../dataset/raw_data'
@@ -27,5 +28,3 @@ class Config(object):
     scheduler_f = 15
 
     maxdisp = 128
-
-    split = 'eigen_full'

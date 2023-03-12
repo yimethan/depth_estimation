@@ -24,9 +24,11 @@ class Train:
         self.device = torch.device("cuda")
 
         self.model = Model()
+        self.model.load_state_dict(torch.load(os.path.join(Config.last_epoch_path, Config.model_name)))
 
         self.model_optimizer = optim.Adam(self.model.parameters(), Config.lr)
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, Config.scheduler_f, 0.1)
+        self.model_optimizer.load_state_dict(torch.load(os.path.join(Config.last_epoch_path, 'optimizer.pth')))
 
         print("Loading dataset...")
         dataset = Dataset()
@@ -76,7 +78,7 @@ class Train:
 
             if (self.epoch + 1) % Config.save_f == 0:
 
-                save_folder = os.path.join(Config.log_dir, 'models', 'weights_epoch{}'.format(self.epoch))
+                save_folder = os.path.join('outputs', 'models', 'weights_epoch{}'.format(self.epoch))
                 
                 if not os.path.exists(save_folder):
 
@@ -84,7 +86,7 @@ class Train:
 
                 # save model
                 print("saving model for this epoch")
-                save_path = os.path.join(save_folder, '{}.pth'.format(Config.model_name))
+                save_path = os.path.join(save_folder, Config.model_name)
                 torch.save(self.model.state_dict(), save_path)
 
                 # save optimizer
@@ -124,6 +126,23 @@ class Train:
                 car_errors = self.compute_car_errors(inputs, outputs)
 
                 self.log("train", inputs, outputs, loss, car_errors, errors)
+
+                if (self.epoch + 1) % Config.save_f == 0:
+
+                    save_folder = os.path.join('outputs', 'models', 'weights_epoch{}_{}'.format(self.epoch, batch_idx))
+
+                    if not os.path.exists(save_folder):
+                        os.makedirs(save_folder)
+
+                    # save model
+                    print("saving model for this epoch")
+                    save_path = os.path.join(save_folder, Config.model_name)
+                    torch.save(self.model.state_dict(), save_path)
+
+                    # save optimizer
+                    save_path = os.path.join(save_folder, '{}.pth'.format('optimizer'))
+                    torch.save(self.model_optimizer.state_dict(), save_path)
+
                 self.test()
 
             self.step += 1
