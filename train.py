@@ -24,11 +24,11 @@ class Train:
         self.device = torch.device("cuda")
 
         self.model = Model()
-        self.model.load_state_dict(torch.load(os.path.join(Config.last_epoch_path, Config.model_name)))
+        # self.model.load_state_dict(torch.load(os.path.join(Config.last_epoch_path, Config.model_name)))
 
         self.model_optimizer = optim.Adam(self.model.parameters(), Config.lr)
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, Config.scheduler_f, 0.1)
-        self.model_optimizer.load_state_dict(torch.load(os.path.join(Config.last_epoch_path, 'optimizer.pth')))
+        # self.model_optimizer.load_state_dict(torch.load(os.path.join(Config.last_epoch_path, 'optimizer.pth')))
 
         print("Loading dataset...")
         dataset = Dataset()
@@ -257,10 +257,10 @@ class Train:
         # pred [1, 128, 128] depth [1, 1, 128, 128]
 
         with torch.no_grad():
-            outputs['l_pred'] = self.model.generate_newpred(outputs['l_pred'], outputs['l_bbox'][:][-1])
-            outputs['r_pred'] = self.model.generate_newpred(outputs['r_pred'], outputs['r_bbox'][:][-1])
-            inputs['l_depth'] = self.model.generate_newgt(inputs['l_depth'], outputs['l_bbox'][:][-1])
-            inputs['r_depth'] = self.model.generate_newgt(inputs['r_depth'], outputs['r_bbox'][:][-1])
+            outputs['l_pred'] = self.model.generate_newpred(outputs['l_pred'], outputs['l_bbox'])
+            outputs['r_pred'] = self.model.generate_newpred(outputs['r_pred'], outputs['r_bbox'])
+            inputs['l_depth'] = self.model.generate_newgt(inputs['l_depth'], outputs['l_bbox'])
+            inputs['r_depth'] = self.model.generate_newgt(inputs['r_depth'], outputs['r_bbox'])
 
         # newpred [1, 128, 128], newgt [1, 1, 128, 128]
 

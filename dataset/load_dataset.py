@@ -60,9 +60,6 @@ class Dataset(data.Dataset):
             idx = 0
             velo_filename = os.path.join(calib_path, sync, 'velodyne_points', 'data', '0000000000.bin')
 
-        l_img = Image.open(self.images['l'][idx]).convert('RGB')
-        r_img = Image.open(self.images['r'][idx]).convert('RGB')
-
         l_gt = self.generate_depth_map(calib_path, velo_filename, 2)
         r_gt = self.generate_depth_map(calib_path, velo_filename, 3)
         l_gt = skimage.transform.resize(l_gt, self.full_res_shape[::-1], order=0, preserve_range=True, mode='constant')
@@ -75,6 +72,9 @@ class Dataset(data.Dataset):
 
         l_gt = torch.from_numpy(l_gt)
         r_gt = torch.from_numpy(r_gt)
+
+        l_img = Image.open(self.images['l'][idx]).convert('RGB')
+        r_img = Image.open(self.images['r'][idx]).convert('RGB')
 
         l_img = self.transform(l_img)
         r_img = self.transform(r_img)

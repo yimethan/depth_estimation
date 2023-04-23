@@ -5,3 +5,4 @@ gen_newinp
 gen_newpred
 dense-depth
 */__pycache__
+*.pt
