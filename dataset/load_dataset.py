@@ -35,11 +35,15 @@ class Dataset(data.Dataset):
 
         self.full_res_shape = (1242, 375)
 
+        self.idx = None
+
     def __len__(self):
 
         return len(self.images['l'])
         
     def __getitem__(self, idx):
+
+        self.idx = idx
 
         split_path1 = (self.images['l'][idx]).split('/')
         split_path = split_path1[2].split('\\')

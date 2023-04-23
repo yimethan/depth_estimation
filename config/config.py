@@ -17,8 +17,8 @@ class Config(object):
     gen_newpred_path_orig = './gen_newpred/orig/'
     gen_newgt_path = './gen_newgt/'
 
-    height = 128
-    width = 256
+    height = 256
+    width = 512
 
     detect_height = 640
     detect_width = 640

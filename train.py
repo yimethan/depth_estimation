@@ -156,11 +156,14 @@ class Train:
 
         self.model.eval()
 
-        try:
-            inputs = self.test_iter.next()
-        except StopIteration:
-            self.test_iter = iter(self.test_loader)
-            inputs = self.test_iter.next()
+        # try:
+        #     inputs = self.test_iter.next()
+        # except StopIteration:
+            # self.test_iter = iter(self.test_loader)
+            # inputs = self.test_iter.next()
+
+        self.test_iter = iter(self.test_loader)
+        inputs = next(self.test_iter)
 
         with torch.no_grad():
             # output = {'l_pred':left_prob, 'r_pred':right_prob,

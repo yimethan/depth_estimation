@@ -6,9 +6,10 @@ from torchvision import transforms
 import time
 
 from dataset.transform import Transform
+from dataset.load_dataset import Dataset
 from model.detect import DlaNet
 from config.config import Config
-from tensorboardX import SummaryWriter
+
 
 class Model(nn.Module):
 
@@ -22,7 +23,7 @@ class Model(nn.Module):
 
         self.transform = Transform()
 
-        self.detect_model = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True)
+        self.detect_model = torch.hub.load('ultralytics/yolov5', 'yolov5m')
         self.detect_model = self.detect_model.to(self.device)
         # higher mAP, half the params
 
@@ -30,11 +31,11 @@ class Model(nn.Module):
         self.depth_model = self.depth_model.to(self.device)
 
     def forward(self, x):
-        
+
         # TODO: detect vehicles in each image
         # (h, w, 3) -> (3, h, w) -> (1, 3, h, w)
         l_inp = x['l_img'].reshape(1, 3, Config.detect_height, Config.detect_width)
-        r_inp = x['r_img'].reshape(1, 3, Config.detect_height, Config.detect_width) # [1, 3, h, w]
+        r_inp = x['r_img'].reshape(1, 3, Config.detect_height, Config.detect_width)  # [1, 3, h, w]
 
         with torch.no_grad():
             # self.detect_model = DlaNet()
@@ -97,8 +98,8 @@ class Model(nn.Module):
         l_prob, r_prob = self.depth_model(l_inp, r_inp, l_newinp, r_newinp)
 
         output = {'l_pred': l_prob, 'r_pred': r_prob,
-                'l_newinp': l_newinp, 'r_newinp': r_newinp,
-                'l_bbox': dets.xyxy[0], 'r_bbox': dets.xyxy[1]}
+                  'l_newinp': l_newinp, 'r_newinp': r_newinp,
+                  'l_bbox': dets.xyxy[0], 'r_bbox': dets.xyxy[1]}
 
         return output
 
@@ -149,7 +150,7 @@ class Model(nn.Module):
     #     detections = torch.cat([bboxes, scores], dim=2)
     #
     #     return detections
-    
+
     # def gather_feat(self, feat, ind):
     #
     #     dim = feat.size(2)
@@ -200,20 +201,21 @@ class Model(nn.Module):
 
         for box in boxes:
 
-            if box[4] > 0.5:
-            # confidence
-
-                if (box[5] == 2) or (box[5] == 5) or (box[5] == 7):
+            if (box[5] == 2) or (box[5] == 5) or (box[5] == 7):
                 # car, bus, truck
 
-                    # bbox = (int(torch.round(x)) for x in box)
-                    bbox = self.rescale_bbox((Config.detect_height, Config.detect_width), (Config.full_res_shape[1], Config.full_res_shape[0]), box[:4])
-                    bbox = list(bbox)
+                # bbox = (int(torch.round(x)) for x in box)
+                bbox = self.rescale_bbox((Config.detect_height, Config.detect_width),
+                                         (Config.full_res_shape[1], Config.full_res_shape[0]), box[:4])
+                bbox = list(bbox)
 
-                    to_paste = gt.crop((bbox[0], bbox[1], bbox[2], bbox[3]))
-                    # left, top, right, bottom (= xmin, ymin, xmax, ymax)
+                if bbox[0] > bbox[2] or bbox[1] > bbox[3]:
+                    continue
 
-                    newimg.paste(to_paste, box=(bbox[0], bbox[1]))
+                to_paste = gt_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3]))
+                # left, top, right, bottom (= xmin, ymin, xmax, ymax)
+
+                newimg.paste(to_paste, box=(bbox[0], bbox[1]))
 
         newimg.save('{}{}.png'.format(Config.gen_newgt_path, time.time()))
 
@@ -235,29 +237,30 @@ class Model(nn.Module):
 
         for box in boxes:
 
-            if box[4] > 0.6:
-            # confidence
-
-                if (box[5] == 2) or (box[5] == 5) or (box[5] == 7):
+            if (box[5] == 2) or (box[5] == 5) or (box[5] == 7):
                 # car, bus, truck
 
-                    # bbox = (int(torch.round(x)) for x in box)
-                    bbox = self.rescale_bbox((Config.detect_height, Config.detect_width), (Config.height, Config.width), box[:4])
-                    bbox = list(bbox)
+                # bbox = (int(torch.round(x)) for x in box)
+                bbox = self.rescale_bbox((Config.detect_height, Config.detect_width), (Config.height, Config.width),
+                                         box[:4])
+                bbox = list(bbox)
 
-                    to_paste = pred_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3]))  # left, top, right, bottom
+                if bbox[0] > bbox[2] or bbox[1] > bbox[3]:
+                    continue
 
-                    newimg.paste(to_paste, box=(bbox[0], bbox[1]))
+                to_paste = pred_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3]))  # left, top, right, bottom
+
+                newimg.paste(to_paste, box=(bbox[0], bbox[1]))
 
         newimg.save('{}{}.png'.format(Config.gen_newpred_path_final, time.time()))
 
         newpred = transforms.ToTensor()(newimg)
-        newpred = newpred.view(Config.batch_size, Config.height, Config.width) # [1, 128, 128]
+        newpred = newpred.view(Config.batch_size, Config.height, Config.width)  # [1, 128, 128]
 
         return newpred
 
     def generate_newinp(self, img, boxes):
-        
+
         # [xmin, ymin, xmax, ymax, score]
 
         img = torch.squeeze(img)
@@ -267,17 +270,18 @@ class Model(nn.Module):
 
         for box in boxes:
 
-            if box[4] > 0.6:
-            # confidence
+            if (box[5] == 2) or (box[5] == 5) or (box[5] == 7):
 
-                if (box[5] == 2) or (box[5] == 5) or (box[5] == 7):
+                bbox = self.rescale_bbox((Config.detect_height, Config.detect_width), (Config.height, Config.width),
+                                         box[:4])
+                bbox = list(bbox)
 
-                    bbox = self.rescale_bbox((Config.detect_height, Config.detect_width), (Config.height, Config.width), box[:4])
-                    bbox = list(bbox)
+                if bbox[0] > bbox[2] or bbox[1] > bbox[3]:
+                    continue
 
-                    one_car = img_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3]))  # left, top, right, bottom
+                one_car = img_pil.crop((bbox[0], bbox[1], bbox[2], bbox[3]))  # left, top, right, bottom
 
-                    newimg.paste(one_car, box=(bbox[0], bbox[1]))
+                newimg.paste(one_car, box=(bbox[0], bbox[1]))
 
         newimg.save('{}{}.png'.format(Config.gen_newinp_path, time.time()))
 
@@ -286,10 +290,10 @@ class Model(nn.Module):
 
         return newinp
 
+
 class BasicBlock(nn.Module):
 
     def __init__(self, in_planes, planes, stride=1):
-
         super(BasicBlock, self).__init__()
         self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=stride, padding=1)
         self.bn1 = nn.BatchNorm2d(planes)
@@ -298,33 +302,33 @@ class BasicBlock(nn.Module):
         self.shortcut = nn.Sequential()
 
     def forward(self, x):
-
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
         out += self.shortcut(x)
         out = F.relu(out)
 
         return out
+
+
 #
 class ThreedConv(nn.Module):
 
     def __init__(self, in_planes, planes, stride=1):
-
         super(ThreedConv, self).__init__()
         self.conv1 = nn.Conv3d(in_planes, planes, kernel_size=3, stride=stride, padding=1)
         self.bn1 = nn.BatchNorm3d(planes)
         self.conv2 = nn.Conv3d(planes, planes, kernel_size=3, stride=1, padding=1)
         self.bn2 = nn.BatchNorm3d(planes)
-        self.conv3 = nn.Conv3d(planes,planes,kernel_size=3,stride=1,padding=1)
+        self.conv3 = nn.Conv3d(planes, planes, kernel_size=3, stride=1, padding=1)
         self.bn3 = nn.BatchNorm3d(planes)
 
     def forward(self, x):
-
         out = F.relu(self.bn1(self.conv1(x)))
         out = F.relu(self.bn2(self.conv2(out)))
         out = F.relu(self.bn3(self.conv3(out)))
 
         return out
+
 
 # modified
 class DepthBlock(nn.Module):
@@ -333,7 +337,7 @@ class DepthBlock(nn.Module):
 
         super(DepthBlock, self).__init__()
 
-        self.maxdisp = int(Config.maxdisp/2)
+        self.maxdisp = int(Config.maxdisp / 2)
         self.in_planes = 32
         self.feature_size = feature_size
 
@@ -361,7 +365,7 @@ class DepthBlock(nn.Module):
         self.bn3d_5 = nn.BatchNorm3d(64)
 
         # conv3d sub_sample block
-        self.block_3d_1 = self._make_layer(block_3d, 64, 64, num_block[1],stride=2)
+        self.block_3d_1 = self._make_layer(block_3d, 64, 64, num_block[1], stride=2)
         self.block_3d_2 = self._make_layer(block_3d, 64, 64, num_block[1], stride=2)
         self.block_3d_3 = self._make_layer(block_3d, 64, 64, num_block[1], stride=2)
         self.block_3d_4 = self._make_layer(block_3d, 64, 128, num_block[1], stride=2)
@@ -471,7 +475,7 @@ class DepthBlock(nn.Module):
 
             else:
 
-                zero = torch.zeros(Config.batch_size, feature_size, Config.height // 2, d).cuda() # [1, 32, 64, d]
+                zero = torch.zeros(Config.batch_size, feature_size, Config.height // 2, d).cuda()  # [1, 32, 64, d]
                 # [1, f, h//2, d] (1, 32, 64, d)
 
                 rightmove = torch.cat([zero, imgr], axis=3)
